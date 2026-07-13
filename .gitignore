@@ -1,0 +1,48 @@
+# SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+
+# Packaged app output
+build/
+*.app
+*.dmg
+*.pkg
+*.zip
+
+# Icons / intermediate packaging
+Icon.icns
+.build/entitlements/
+
+# Xcode (if opened later)
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Editor / agent noise
+*.swp
+*~
+.idea/
+.vscode/
+*.orig
+
+# Orchestration run artifacts (prompts/logs). Keep `.grok/agents` as reusable defs.
+.orchestration/
+
+# Local secrets / signing (never commit)
+*.p12
+*.cer
+AuthKey_*.p8
+notary-credentials.env
+
+# Test / temp
+/tmp/
+*.log
+.coverage/

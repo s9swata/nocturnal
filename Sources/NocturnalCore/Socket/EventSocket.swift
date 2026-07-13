@@ -1,0 +1,433 @@
+import Foundation
+
+/// Errors from the NDJSON Unix-domain socket bridge.
+public enum EventSocketError: Error, Sendable, Equatable {
+    case pathTooLong(String)
+    case bindFailed(String)
+    case listenFailed(String)
+    case connectFailed(String)
+    case connectTimeout(String)
+    case notRunning
+    case encodingFailed
+    case decodingFailed(String)
+}
+
+/// Lightweight diagnostics for the socket bridge (Sendable snapshot).
+public struct EventSocketDiagnostics: Sendable, Equatable {
+    public var acceptedClients: UInt64
+    public var closedClients: UInt64
+    public var linesReceived: UInt64
+    public var envelopesYielded: UInt64
+    public var decodeFailures: UInt64
+    public var lastError: String?
+
+    public init(
+        acceptedClients: UInt64 = 0,
+        closedClients: UInt64 = 0,
+        linesReceived: UInt64 = 0,
+        envelopesYielded: UInt64 = 0,
+        decodeFailures: UInt64 = 0,
+        lastError: String? = nil
+    ) {
+        self.acceptedClients = acceptedClients
+        self.closedClients = closedClients
+        self.linesReceived = linesReceived
+        self.envelopesYielded = envelopesYielded
+        self.decodeFailures = decodeFailures
+        self.lastError = lastError
+    }
+}
+
+/// Server side: app listens for NDJSON lines from hook forwarders.
+///
+/// Accept loop is cancel-safe: ``stop()`` closes the listening fd so a blocked
+/// `accept` unblocks. Multi-client reads fan into a single ``AsyncStream``.
+public actor EventSocketServer {
+    public private(set) var isRunning = false
+    public private(set) var diagnostics = EventSocketDiagnostics()
+
+    private let path: URL
+    private let maxLineBytes: Int
+    private var listener: LocalUnixListener?
+    private var clientTasks: [UUID: Task<Void, Never>] = [:]
+    private var acceptTask: Task<Void, Never>?
+    private var eventContinuation: AsyncStream<EventEnvelope>.Continuation?
+    private var eventStream: AsyncStream<EventEnvelope>?
+
+    public init(path: URL, maxLineBytes: Int = 1_048_576) {
+        self.path = path
+        self.maxLineBytes = max(4096, maxLineBytes)
+    }
+
+    /// Start listening. Yields decoded envelopes on the returned stream.
+    /// Calling again while running returns the existing stream.
+    public func start() throws -> AsyncStream<EventEnvelope> {
+        if let existing = eventStream, isRunning {
+            return existing
+        }
+
+        let listener = LocalUnixListener(path: path)
+        try listener.bindAndListen()
+        self.listener = listener
+        isRunning = true
+        diagnostics = EventSocketDiagnostics()
+
+        let (stream, continuation) = AsyncStream<EventEnvelope>.makeStream(
+            bufferingPolicy: .bufferingNewest(512)
+        )
+        self.eventContinuation = continuation
+        self.eventStream = stream
+
+        acceptTask = Task { [weak self] in
+            await self?.acceptLoop()
+        }
+
+        return stream
+    }
+
+    public func stop() {
+        isRunning = false
+        acceptTask?.cancel()
+        acceptTask = nil
+        listener?.close()
+        listener = nil
+        for task in clientTasks.values {
+            task.cancel()
+        }
+        clientTasks.removeAll()
+        eventContinuation?.finish()
+        eventContinuation = nil
+        eventStream = nil
+        try? FileManager.default.removeItem(at: path)
+    }
+
+    public func currentDiagnostics() -> EventSocketDiagnostics {
+        diagnostics
+    }
+
+    private func acceptLoop() async {
+        while isRunning, !Task.isCancelled, let listener {
+            do {
+                let handle = try await listener.accept()
+                guard isRunning, !Task.isCancelled else {
+                    try? handle.close()
+                    break
+                }
+                diagnostics.acceptedClients &+= 1
+                let clientID = UUID()
+                let task = Task { [weak self] in
+                    guard let self else { return }
+                    await self.readClient(handle, id: clientID)
+                }
+                clientTasks[clientID] = task
+            } catch {
+                if isRunning && !Task.isCancelled {
+                    diagnostics.lastError = String(describing: error)
+                }
+                break
+            }
+        }
+    }
+
+    private func readClient(_ handle: FileHandle, id: UUID) async {
+        defer {
+            try? handle.close()
+            clientTasks[id] = nil
+            diagnostics.closedClients &+= 1
+        }
+
+        let decoder = makeEnvelopeDecoder()
+        var buffer = Data()
+
+        while !Task.isCancelled && isRunning {
+            let chunk: Data
+            do {
+                guard let data = try handle.read(upToCount: 8192), !data.isEmpty else {
+                    break
+                }
+                chunk = data
+            } catch {
+                diagnostics.lastError = error.localizedDescription
+                break
+            }
+
+            buffer.append(chunk)
+            if buffer.count > maxLineBytes * 2 {
+                // Pathological client: drop buffer, keep listening for next newline.
+                diagnostics.decodeFailures &+= 1
+                diagnostics.lastError = "client buffer exceeded limit"
+                if let nl = buffer.lastIndex(of: 0x0A) {
+                    buffer.removeSubrange(..<buffer.index(after: nl))
+                } else {
+                    buffer.removeAll(keepingCapacity: true)
+                }
+            }
+
+            while let range = buffer.range(of: Data([0x0A])) {
+                let line = buffer.subdata(in: buffer.startIndex..<range.lowerBound)
+                buffer.removeSubrange(buffer.startIndex...range.lowerBound)
+                guard !line.isEmpty else { continue }
+                diagnostics.linesReceived &+= 1
+
+                if line.count > maxLineBytes {
+                    diagnostics.decodeFailures &+= 1
+                    diagnostics.lastError = "line exceeded \(maxLineBytes) bytes"
+                    continue
+                }
+
+                do {
+                    let envelope = try decoder.decode(EventEnvelope.self, from: line)
+                    eventContinuation?.yield(envelope)
+                    diagnostics.envelopesYielded &+= 1
+                } catch {
+                    // Fail-open: drop bad lines, never crash the server.
+                    diagnostics.decodeFailures &+= 1
+                    diagnostics.lastError = "decode: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func makeEnvelopeDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            try EventEnvelopeDateParsing.decode(from: decoder)
+        }
+        return decoder
+    }
+}
+
+/// Client side used by hook-forwarder and simulation CLIs.
+public struct EventSocketClient: Sendable {
+    public var path: URL
+    /// Connect timeout in seconds. Default 500ms keeps hooks snappy / fail-open.
+    public var connectTimeout: TimeInterval
+
+    public init(path: URL, connectTimeout: TimeInterval = 0.5) {
+        self.path = path
+        self.connectTimeout = max(0.05, connectTimeout)
+    }
+
+    /// Connect, write one NDJSON line (with trailing newline), disconnect.
+    /// Throws on hard failures so the forwarder can decide fail-open policy.
+    public func send(_ envelope: EventEnvelope) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        guard var data = try? encoder.encode(envelope) else {
+            throw EventSocketError.encodingFailed
+        }
+        data.append(0x0A)
+        try LocalUnixClient.send(data: data, to: path, timeout: connectTimeout)
+    }
+
+    /// Send raw bytes (already NDJSON). Used by fail-open forwarder.
+    public func sendRawLine(_ line: Data) throws {
+        var data = line
+        if data.last != 0x0A {
+            data.append(0x0A)
+        }
+        try LocalUnixClient.send(data: data, to: path, timeout: connectTimeout)
+    }
+}
+
+// MARK: - BSD socket helpers
+
+/// Unix-domain stream listener with cancel-friendly accept.
+final class LocalUnixListener: @unchecked Sendable {
+    private let path: URL
+    private let lock = NSLock()
+    private var fd: Int32 = -1
+
+    init(path: URL) {
+        self.path = path
+    }
+
+    func bindAndListen(backlog: Int32 = 32) throws {
+        if FileManager.default.fileExists(atPath: path.path) {
+            try FileManager.default.removeItem(at: path)
+        }
+        try FileManager.default.createDirectory(
+            at: path.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        let sock = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard sock >= 0 else {
+            throw EventSocketError.bindFailed("socket() failed: \(errno)")
+        }
+
+        var on: Int32 = 1
+        _ = setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathString = path.path
+        let maxLen = MemoryLayout.size(ofValue: addr.sun_path) - 1
+        guard pathString.utf8.count <= maxLen else {
+            Darwin.close(sock)
+            throw EventSocketError.pathTooLong(pathString)
+        }
+        pathString.withCString { src in
+            withUnsafeMutablePointer(to: &addr.sun_path) { dst in
+                _ = strcpy(UnsafeMutableRawPointer(dst).assumingMemoryBound(to: CChar.self), src)
+            }
+        }
+
+        let bindResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.bind(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard bindResult == 0 else {
+            let err = errno
+            Darwin.close(sock)
+            throw EventSocketError.bindFailed("bind failed: \(err)")
+        }
+
+        guard Darwin.listen(sock, backlog) == 0 else {
+            let err = errno
+            Darwin.close(sock)
+            throw EventSocketError.listenFailed("listen failed: \(err)")
+        }
+
+        lock.lock()
+        fd = sock
+        lock.unlock()
+    }
+
+    func accept() async throws -> FileHandle {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                self.lock.lock()
+                let listenFD = self.fd
+                self.lock.unlock()
+                guard listenFD >= 0 else {
+                    continuation.resume(throwing: EventSocketError.notRunning)
+                    return
+                }
+
+                var addr = sockaddr_un()
+                var len = socklen_t(MemoryLayout<sockaddr_un>.size)
+                let clientFD = withUnsafeMutablePointer(to: &addr) { ptr in
+                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                        Darwin.accept(listenFD, sockPtr, &len)
+                    }
+                }
+                if clientFD < 0 {
+                    let err = errno
+                    // EBADF / EINVAL after close() during stop — treat as not running.
+                    if err == EBADF || err == EINVAL {
+                        continuation.resume(throwing: EventSocketError.notRunning)
+                    } else {
+                        continuation.resume(throwing: EventSocketError.listenFailed("accept failed: \(err)"))
+                    }
+                } else {
+                    // Independent lifetime from the listener.
+                    let handle = FileHandle(fileDescriptor: clientFD, closeOnDealloc: true)
+                    continuation.resume(returning: handle)
+                }
+            }
+        }
+    }
+
+    func close() {
+        lock.lock()
+        let toClose = fd
+        fd = -1
+        lock.unlock()
+        if toClose >= 0 {
+            Darwin.shutdown(toClose, SHUT_RDWR)
+            Darwin.close(toClose)
+        }
+    }
+
+    deinit {
+        close()
+    }
+}
+
+enum LocalUnixClient {
+    static func send(data: Data, to path: URL, timeout: TimeInterval) throws {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            throw EventSocketError.connectFailed("socket() failed: \(errno)")
+        }
+        defer { Darwin.close(fd) }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathString = path.path
+        let maxLen = MemoryLayout.size(ofValue: addr.sun_path) - 1
+        guard pathString.utf8.count <= maxLen else {
+            throw EventSocketError.pathTooLong(pathString)
+        }
+        pathString.withCString { src in
+            withUnsafeMutablePointer(to: &addr.sun_path) { dst in
+                _ = strcpy(UnsafeMutableRawPointer(dst).assumingMemoryBound(to: CChar.self), src)
+            }
+        }
+
+        // Non-blocking connect + poll for timeout (hooks must not hang).
+        let flags = fcntl(fd, F_GETFL, 0)
+        if flags >= 0 {
+            _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        }
+
+        let result = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+
+        if result != 0 {
+            let err = errno
+            if err == EINPROGRESS {
+                var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                let timeoutMs = Int32((timeout * 1000).rounded(.up))
+                let pr = poll(&pfd, 1, timeoutMs)
+                if pr == 0 {
+                    throw EventSocketError.connectTimeout(pathString)
+                }
+                if pr < 0 {
+                    throw EventSocketError.connectFailed("poll failed: \(errno) path=\(pathString)")
+                }
+                var soError: Int32 = 0
+                var len = socklen_t(MemoryLayout<Int32>.size)
+                _ = getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &len)
+                if soError != 0 {
+                    throw EventSocketError.connectFailed("connect failed: \(soError) path=\(pathString)")
+                }
+            } else {
+                throw EventSocketError.connectFailed("connect failed: \(err) path=\(pathString)")
+            }
+        }
+
+        // Restore blocking for the send path; still cap with SO_SNDTIMEO.
+        if flags >= 0 {
+            _ = fcntl(fd, F_SETFL, flags)
+        }
+        var tv = timeval(
+            tv_sec: Int(timeout),
+            tv_usec: Int32((timeout.truncatingRemainder(dividingBy: 1)) * 1_000_000)
+        )
+        _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+        try data.withUnsafeBytes { buffer in
+            guard let base = buffer.baseAddress else { return }
+            var sent = 0
+            let total = buffer.count
+            while sent < total {
+                let n = Darwin.send(fd, base.advanced(by: sent), total - sent, 0)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    throw EventSocketError.connectFailed("send failed: \(errno)")
+                }
+                if n == 0 {
+                    throw EventSocketError.connectFailed("send returned 0")
+                }
+                sent += n
+            }
+        }
+    }
+}
