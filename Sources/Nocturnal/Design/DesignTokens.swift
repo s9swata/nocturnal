@@ -39,9 +39,9 @@ enum NocturnalLayout {
     static let rowSpacing: CGFloat = 10
     static let cornerRadiusPill: CGFloat = 18
     static let cornerRadiusPanel: CGFloat = 14
-    /// Inset from visible screen edges when clamping expanded panel.
-    static let screenEdgeInset: CGFloat = 8
-    /// Extra vertical room reserved for notch / menu bar gap when clamping.
+    /// Inset from visible screen edges when placing / clamping the panel.
+    static let screenEdgeInset: CGFloat = OverlayGeometry.screenEdgeInset
+    /// Extra room reserved inside the visible frame when clamping expanded size.
     static let panelScreenPadding: CGFloat = OverlayGeometry.panelScreenPadding
 }
 

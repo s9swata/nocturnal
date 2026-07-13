@@ -147,6 +147,13 @@ final class AppModel {
         }
 
         isBootstrapped = true
+
+        // Local layout probe only (simulation / packaged verification). Not a user setting.
+        // Example: NOCTURNAL_OVERLAY_EXPANDED=1 open build/Nocturnal.app
+        if ProcessInfo.processInfo.environment["NOCTURNAL_OVERLAY_EXPANDED"] == "1" {
+            isOverlayExpanded = true
+        }
+
         syncOverlayVisibility()
     }
 
@@ -297,17 +304,24 @@ final class AppModel {
     }
 
     func setOverlayExpanded(_ expanded: Bool) {
-        let animation = NocturnalMotion.expand(reduceMotion: prefersReducedMotion)
-        if let animation {
-            withAnimation(animation) {
-                isOverlayExpanded = expanded
+        // Geometry: OverlayController / NSPanel is the sole size authority
+        // (`NSHostingView.sizingOptions = []`). Do not wrap the model flag in a
+        // SwiftUI size transaction that races AppKit `setFrame` — that restarted
+        // layout and contributed to the constraint-cycle crash.
+        // Content transitions (opacity) are driven by OverlayRootView's
+        // `.animation(_:value:)` on `isOverlayExpanded`.
+        //
+        // Expand: grow panel first so expanded content has a stable frame.
+        // Collapse: swap content first so the pill is not stretched during shrink.
+        if expanded {
+            overlay.setExpanded(true, reduceMotion: prefersReducedMotion)
+            isOverlayExpanded = true
+            if selectedSessionID == nil {
+                selectedSessionID = visibleSessions.first?.id
             }
         } else {
-            isOverlayExpanded = expanded
-        }
-        overlay.setExpanded(expanded, reduceMotion: prefersReducedMotion)
-        if expanded, selectedSessionID == nil {
-            selectedSessionID = visibleSessions.first?.id
+            isOverlayExpanded = false
+            overlay.setExpanded(false, reduceMotion: prefersReducedMotion)
         }
     }
 

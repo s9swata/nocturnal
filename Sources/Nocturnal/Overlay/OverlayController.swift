@@ -8,6 +8,14 @@ import SwiftUI
 /// Notch-aware top-center placement, multi-display awareness, and expand/collapse
 /// sizing live here. SwiftUI owns visual content via ``OverlayRootView``.
 ///
+/// ## Geometry ownership
+/// **`NSPanel` is the single source of truth for overlay dimensions.** The hosting
+/// view is frame-based and must never drive window size via intrinsic/min/max
+/// content sizing (`sizingOptions = []`). Leaving automatic hosting sizing enabled
+/// caused a recursive Auto Layout cycle on modern macOS:
+/// `updateAnimatedWindowSize` → `setFrameSize` → `invalidateSafeAreaInsets` →
+/// `setNeedsUpdateConstraints` → NSGenericException (too many constraint passes).
+///
 /// ## Compact chrome (no rectangular backing)
 /// The compact panel intentionally:
 /// - Uses a clear, non-opaque `NSPanel`
@@ -29,13 +37,14 @@ final class OverlayController {
         self.model = model
 
         if panel == nil {
+            let screen = preferredScreen()
+            let size = targetSize(expanded: expanded, on: screen)
+
             let root = OverlayRootView(model: model)
             let hosting = NSHostingView(rootView: root)
-            configureClearHosting(hosting)
+            // Frame-based host: panel owns size; content fills via autoresizing.
+            configureFrameBasedHosting(hosting)
             hostingView = hosting
-
-            let size = targetSize(expanded: expanded, on: preferredScreen())
-            hosting.frame = NSRect(origin: .zero, size: size)
 
             let panel = NSPanel(
                 contentRect: NSRect(origin: .zero, size: size),
@@ -54,22 +63,27 @@ final class OverlayController {
             panel.hidesOnDeactivate = false
             panel.becomesKeyOnlyIfNeeded = true
             panel.acceptsMouseMovedEvents = true
-            panel.contentView = hosting
             panel.isMovableByWindowBackground = false
 
-            // Ensure the content view chain never paints an opaque rectangle.
-            if let content = panel.contentView {
-                content.wantsLayer = true
-                content.layer?.backgroundColor = NSColor.clear.cgColor
-                content.layer?.isOpaque = false
-            }
+            // Assign content view before positioning so autoresizing binds to the
+            // content rect. Do not manually rewrite hosting.frame after setFrame —
+            // that fought Auto Layout and contributed to constraint thrash.
+            panel.contentView = hosting
+            configureClearChrome(on: panel, hosting: hosting)
 
             self.panel = panel
             installScreenObservers()
+
+            // Stable order: create → configure host → set contentView → setFrame once.
+            if let placeScreen = screen ?? NSScreen.main ?? NSScreen.screens.first {
+                let frame = frameForSize(size, on: placeScreen)
+                panel.setFrame(frame, display: true)
+            }
         } else {
             hostingView?.rootView = OverlayRootView(model: model)
             if let hostingView {
-                configureClearHosting(hostingView)
+                configureFrameBasedHosting(hostingView)
+                configureClearChrome(on: panel, hosting: hostingView)
             }
         }
 
@@ -97,19 +111,23 @@ final class OverlayController {
         panel.backgroundColor = .clear
         panel.isOpaque = false
 
+        // Sole geometry animation path: AppKit panel frame only.
+        // Hosting view does not participate in size (sizingOptions empty).
         if animated, !reduceMotion {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.22
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                // Allow the animator to change frame without re-enabling content sizing.
                 panel.animator().setFrame(frame, display: true)
             }
         } else {
             panel.setFrame(frame, display: true)
         }
 
-        hostingView?.frame = NSRect(origin: .zero, size: size)
+        // Content view bounds track the panel content rect via autoresizing —
+        // do not assign hostingView.frame here (redundant and layout-hostile).
         if let hostingView {
-            configureClearHosting(hostingView)
+            configureClearChrome(on: panel, hosting: hostingView)
         }
     }
 
@@ -140,40 +158,68 @@ final class OverlayController {
         return NSSize(width: size.width, height: size.height)
     }
 
-    /// Configuration snapshot for regression tests (no live window required).
-    struct CompactChromeConfiguration: Equatable, Sendable {
+    // MARK: - Host layout / chrome contracts (production helpers)
+
+    /// Frame-based hosting + clear non-opaque chrome — production configuration
+    /// that must stay true to avoid the constraint-cycle crash and square margins.
+    struct HostLayoutConfiguration: Equatable, Sendable {
+        /// `NSHostingSizingOptions` must be empty so intrinsic content cannot resize the panel.
+        var sizingOptionsEmpty: Bool
+        /// Hosting view resizes with the panel content rect (width + height).
+        var autoresizesWithPanel: Bool
         var panelIsOpaque: Bool
         var panelHasShadow: Bool
         var panelBackgroundIsClear: Bool
-        var hostingDrawsBackground: Bool
+        var hostingLayerIsClear: Bool
     }
 
-    /// Expected compact-panel chrome — documents the square-margin fix contract.
-    static var expectedCompactChrome: CompactChromeConfiguration {
-        CompactChromeConfiguration(
+    /// Expected production host layout / chrome contract.
+    static var expectedHostLayout: HostLayoutConfiguration {
+        HostLayoutConfiguration(
+            sizingOptionsEmpty: true,
+            autoresizesWithPanel: true,
             panelIsOpaque: false,
             panelHasShadow: false,
             panelBackgroundIsClear: true,
-            hostingDrawsBackground: false
+            hostingLayerIsClear: true
         )
     }
 
+    /// Legacy name used by chrome-only call sites; same contract as ``expectedHostLayout``.
+    static var expectedCompactChrome: HostLayoutConfiguration { expectedHostLayout }
+
     /// Live configuration of the current panel, if shown.
-    var compactChromeConfiguration: CompactChromeConfiguration? {
+    var hostLayoutConfiguration: HostLayoutConfiguration? {
         guard let panel, let hostingView else { return nil }
         let bgClear: Bool = {
             guard let color = panel.backgroundColor else { return false }
             return color.alphaComponent < 0.01
         }()
-        return CompactChromeConfiguration(
+        let layerClear: Bool = {
+            guard let cg = hostingView.layer?.backgroundColor else {
+                // No fill is acceptable (clear by default when non-opaque).
+                return hostingView.layer?.isOpaque != true
+            }
+            let color = NSColor(cgColor: cg)
+            return (color?.alphaComponent ?? 0) < 0.01 && hostingView.layer?.isOpaque != true
+        }()
+        let mask = hostingView.autoresizingMask
+        let autoresizes = mask.contains(.width) && mask.contains(.height)
+        return HostLayoutConfiguration(
+            sizingOptionsEmpty: hostingView.sizingOptions.isEmpty,
+            autoresizesWithPanel: autoresizes,
             panelIsOpaque: panel.isOpaque,
             panelHasShadow: panel.hasShadow,
             panelBackgroundIsClear: bgClear,
-            hostingDrawsBackground: hostingView.layer?.backgroundColor != nil
-                && hostingView.layer?.backgroundColor != NSColor.clear.cgColor
-                && (hostingView.layer?.isOpaque == true)
+            hostingLayerIsClear: layerClear
         )
     }
+
+    /// Live configuration alias (compact chrome naming used in older docs/tests).
+    var compactChromeConfiguration: HostLayoutConfiguration? { hostLayoutConfiguration }
+
+    /// Current panel frame for debug / Accessibility probes (nil if not shown).
+    var panelFrame: NSRect? { panel?.frame }
 
     // MARK: - Private geometry
 
@@ -201,45 +247,56 @@ final class OverlayController {
         panel.setFrame(frame, display: true)
     }
 
-    /// Top-center or notch-safe placement. Uses `safeAreaInsets` when available
-    /// so the pill sits below the camera housing on notched MacBooks.
+    /// Top-center or notch-safe placement via Core pure geometry.
     private func frameForSize(_ size: NSSize, on screen: NSScreen) -> NSRect {
-        let visible = screen.visibleFrame
-        let full = screen.frame
-
-        // Distance from top of screen to top of visible frame ≈ menu bar.
-        let menuBarHeight = max(0, full.maxY - visible.maxY)
-
-        // Notch / camera housing: on macOS 12+ safeAreaInsets.top can exceed menu bar.
-        var topInset = menuBarHeight
-        let safeTop = screen.safeAreaInsets.top
-        if safeTop > 0 {
-            topInset = max(menuBarHeight, safeTop)
-        }
-
-        // Sit a few points below the menu bar / notch, centered horizontally.
-        let gap: CGFloat = 6
-        let x = visible.midX - size.width / 2
-        let y = full.maxY - topInset - size.height - gap
-
-        // Clamp so multi-height panels stay on-screen.
-        let inset = NocturnalLayout.screenEdgeInset
-        let minY = visible.minY + inset
-        let clampedY = max(minY, min(y, visible.maxY - size.height - 4))
-        let clampedX = min(max(x, visible.minX + inset), visible.maxX - size.width - inset)
-
-        return NSRect(x: clampedX, y: clampedY, width: size.width, height: size.height)
+        let rect = OverlayGeometry.topCenterFrame(
+            size: CGSize(width: size.width, height: size.height),
+            screenFrame: screen.frame,
+            visibleFrame: screen.visibleFrame,
+            safeAreaTop: screen.safeAreaInsets.top,
+            gap: 6,
+            edgeInset: OverlayGeometry.screenEdgeInset
+        )
+        return NSRect(x: rect.origin.x, y: rect.origin.y, width: rect.width, height: rect.height)
     }
 
-    private func configureClearHosting(_ hosting: NSHostingView<OverlayRootView>) {
+    /// Configure hosting as a frame-based content view that never drives panel size.
+    /// Applies ``OverlayHostLayoutPolicy`` (empty sizing options + autoresizing).
+    private func configureFrameBasedHosting(_ hosting: NSHostingView<OverlayRootView>) {
+        // Disable min/intrinsic/max/preferred automatic window sizing (macOS 13+).
+        // Empty option set is the supported way to make AppKit the sole size authority.
+        // Matches OverlayHostLayoutPolicy.disabledHostingSizingOptionsRawValue == 0.
+        hosting.sizingOptions = NSHostingSizingOptions(
+            rawValue: OverlayHostLayoutPolicy.disabledHostingSizingOptionsRawValue
+        )
+        // Do not inherit window safe-area driven invalidation loops for this borderless panel.
+        if #available(macOS 13.3, *) {
+            hosting.safeAreaRegions = []
+        }
+        hosting.translatesAutoresizingMaskIntoConstraints = true
+        if OverlayHostLayoutPolicy.autoresizesWidthAndHeight {
+            hosting.autoresizingMask = [.width, .height]
+        }
+        configureClearHostingLayer(hosting)
+    }
+
+    private func configureClearHostingLayer(_ hosting: NSHostingView<OverlayRootView>) {
         hosting.wantsLayer = true
         hosting.layer?.backgroundColor = NSColor.clear.cgColor
         hosting.layer?.isOpaque = false
-        // Avoid any default material / opaque fill from the hosting view.
-        if #available(macOS 14.0, *) {
-            // NSHostingView on modern macOS respects clear layer when non-opaque.
-        }
         hosting.layerContentsRedrawPolicy = .onSetNeedsDisplay
+    }
+
+    private func configureClearChrome(on panel: NSPanel?, hosting: NSHostingView<OverlayRootView>) {
+        panel?.backgroundColor = .clear
+        panel?.isOpaque = false
+        panel?.hasShadow = false
+        configureClearHostingLayer(hosting)
+        if let content = panel?.contentView {
+            content.wantsLayer = true
+            content.layer?.backgroundColor = NSColor.clear.cgColor
+            content.layer?.isOpaque = false
+        }
     }
 
     private func installScreenObservers() {

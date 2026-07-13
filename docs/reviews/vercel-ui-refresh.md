@@ -66,3 +66,46 @@ swift test
 Scripts/package_app.sh
 # Inspect Info.plist CFBundleIconFile, Resources/Icon.icns, Resources/Brand/*
 ```
+
+---
+
+## Overlay constraint-cycle crash + width compression (2026-07-13)
+
+### Symptom (packaged binary, macOS 26.2)
+
+- App aborts after launch with uncaught **`NSGenericException`**.
+- Reason: *The window has been marked as needing another Update Constraints in Window pass, but it has already had more passes than there are views.*
+- Faulting window: `NSPanel` ≈ **225 × 218**.
+- Stack: `NSHostingView.updateAnimatedWindowSize` → `windowDidLayout` → `setFrameSize` → `invalidateSafeAreaInsets` → `setNeedsUpdateConstraints`.
+- Expanded panel also **narrowed** toward empty-state fitting width instead of staying **520 × 620** on a 1440-pt display.
+
+### Root cause (exact)
+
+`OverlayController` owned compact **228 × 36** and expanded ideal **520 × 620** via `NSPanel.setFrame`, but the `NSHostingView` still participated in **automatic window sizing** (default `sizingOptions` including min / intrinsic / max content size). Empty-state SwiftUI intrinsic size (~225 × 218) drove `updateAnimatedWindowSize`, which rewrote the panel frame, invalidated safe-area insets, and re-entered Auto Layout until the constraint-pass limit. A post-`setFrame` manual `hostingView.frame = …` assignment compounded the fight. Simultaneous SwiftUI size animation + AppKit frame animation restarted layout mid-cycle.
+
+### Fix
+
+1. **`NSPanel` is the single source of truth for dimensions.**
+2. Set `hosting.sizingOptions = []` (empty `NSHostingSizingOptions`) so intrinsic content cannot mutate the panel.
+3. `safeAreaRegions = []` (macOS 13.3+) to avoid safe-area invalidation thrash on the borderless panel.
+4. Frame-based host: `translatesAutoresizingMaskIntoConstraints = true`, `autoresizingMask = [.width, .height]` — content fills the panel content rect without Auto Layout window sizing.
+5. **Remove** redundant `hostingView.frame` writes after `panel.setFrame`.
+6. Stable create order: configure host → assign `contentView` → `setFrame` once.
+7. Expand/collapse ordering: grow panel before flipping model expanded; collapse content before shrinking frame. AppKit frame remains the sole geometry animation path; SwiftUI only opacity-transitions content. Respect Reduce Motion.
+8. Keep clear non-opaque panel/host and `hasShadow = false` (capsule shadow fix intact).
+
+### Regression coverage
+
+- Core: `OverlayGeometry` placement + clamp (including 1440-pt display keeps 520×620).
+- Core: `OverlayHostLayoutPolicy` — empty sizing-options raw value, chrome flags, negative cases.
+- UI: `OverlayController.HostLayoutConfiguration` / `hostLayoutConfiguration` production helper for live assertion.
+
+### Verification (packaged)
+
+```bash
+swift test
+Scripts/package_app.sh
+git diff --check
+codesign --verify --verbose=2 build/Nocturnal.app
+# Launch binary ≥30s, expand (⌘⇧P), confirm NSPanel 520×620, quit cleanly
+```

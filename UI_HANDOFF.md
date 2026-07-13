@@ -140,6 +140,16 @@ See `docs/reviews/vercel-ui-refresh.md`.
 
 ---
 
+## Overlay geometry ownership (constraint-cycle crash)
+
+See `docs/reviews/vercel-ui-refresh.md` (section *Overlay constraint-cycle crash*).
+
+**Root cause:** `NSHostingView` automatic window sizing (`updateAnimatedWindowSize` via default `sizingOptions`) fought manual `NSPanel.setFrame`, compressed empty state to ~225×218, narrowed expanded width, and looped Auto Layout until `NSGenericException`.
+
+**Fix:** `sizingOptions = []`, frame-based autoresizing host, no post-`setFrame` content-frame writes, AppKit-only size animation, Core `OverlayGeometry` + `OverlayHostLayoutPolicy` contracts. Compact **228×36**, expanded ideal **520×620** with screen clamp.
+
+---
+
 ## How to run
 
 ```bash
