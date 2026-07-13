@@ -1,0 +1,2 @@
+{"v":1,"id":"22222222-2222-4222-8222-222222222221","source":"codex","eventType":"tool.approval_required","sessionId":"codex-sess-02","timestamp":"2023-11-14T22:14:00Z","payload":{"request_id":"apr-100","tool":"shell","summary":"Run tests","detail":"swift test","risk":"low","title":"Test run","cwd":"/Users/demo/Projects/nocturnal"},"raw":{}}
+{"v":1,"id":"22222222-2222-4222-8222-222222222222","source":"codex","eventType":"tool.approval_resolved","sessionId":"codex-sess-02","timestamp":"2023-11-14T22:14:30Z","payload":{"request_id":"apr-100","approved":true},"raw":{}}

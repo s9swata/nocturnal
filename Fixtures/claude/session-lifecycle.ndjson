@@ -1,0 +1,4 @@
+{"v":1,"id":"44444444-4444-4444-8444-444444444441","source":"claude","eventType":"SessionStart","sessionId":"claude-sess-01","timestamp":"2023-11-14T22:16:00Z","payload":{"title":"Docs pass","cwd":"/Users/demo/Projects/nocturnal/docs"},"raw":{}}
+{"v":1,"id":"44444444-4444-4444-8444-444444444442","source":"claude","eventType":"PreToolUse","sessionId":"claude-sess-01","timestamp":"2023-11-14T22:16:10Z","payload":{"tool_name":"Read","requires_permission":false},"raw":{}}
+{"v":1,"id":"44444444-4444-4444-8444-444444444443","source":"claude","eventType":"PreToolUse","sessionId":"claude-sess-01","timestamp":"2023-11-14T22:16:20Z","payload":{"tool_name":"Bash","tool_use_id":"tu-9","requires_permission":true,"summary":"git status","input":"git status"},"raw":{}}
+{"v":1,"id":"44444444-4444-4444-8444-444444444444","source":"claude","eventType":"Stop","sessionId":"claude-sess-01","timestamp":"2023-11-14T22:17:00Z","payload":{"message":"Turn complete"},"raw":{}}
