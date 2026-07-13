@@ -49,6 +49,10 @@ struct SocketBridgeTests {
         await server.stop()
     }
 
+    /// Two sequential `sendRawLine` calls are two short-lived connections
+    /// (client connect→write→close per call). Server multi-client reads fan into
+    /// one stream without a global total order, so cross-client arrival order is
+    /// not guaranteed — only that both envelopes are delivered intact.
     @Test func rawLineAndMultipleClients() async throws {
         let (temp, cleanup) = try TestSupport.makeShortSocketRoot(prefix: "nm")
         defer { cleanup() }
@@ -58,6 +62,8 @@ struct SocketBridgeTests {
         let stream = try await server.start()
         try await Task.sleep(for: .milliseconds(50))
 
+        let idStart = UUID(uuidString: "11111111-1111-4111-8111-111111111101")!
+        let idStop = UUID(uuidString: "11111111-1111-4111-8111-111111111102")!
         let line1 = Data(#"{"v":1,"id":"11111111-1111-4111-8111-111111111101","source":"claude","eventType":"SessionStart","sessionId":"c1","timestamp":"2023-11-14T22:13:20Z","payload":{"title":"A"},"raw":{}}"#.utf8)
         let line2 = Data(#"{"v":1,"id":"11111111-1111-4111-8111-111111111102","source":"claude","eventType":"Stop","sessionId":"c1","timestamp":"2023-11-14T22:13:25Z","payload":{},"raw":{}}"#.utf8)
 
@@ -72,8 +78,22 @@ struct SocketBridgeTests {
         }
 
         #expect(collected.count == 2)
-        #expect(collected[0].sessionId == "c1")
-        #expect(collected.map(\.eventType) == ["SessionStart", "Stop"])
+        #expect(Set(collected.map(\.sessionId)) == ["c1"])
+        // Order-independent: each sendRawLine is a separate connection; accept/read
+        // scheduling may yield Stop before SessionStart (or vice versa).
+        #expect(Set(collected.map(\.eventType)) == ["SessionStart", "Stop"])
+        #expect(Set(collected.map(\.id)) == [idStart, idStop])
+
+        let byID = Dictionary(uniqueKeysWithValues: collected.map { ($0.id, $0) })
+        let start = try #require(byID[idStart])
+        #expect(start.eventType == "SessionStart")
+        #expect(start.source == .claude)
+        #expect(start.payload["title"] == .string("A"))
+
+        let stop = try #require(byID[idStop])
+        #expect(stop.eventType == "Stop")
+        #expect(stop.source == .claude)
+        #expect(stop.payload.isEmpty)
 
         await server.stop()
     }
@@ -213,6 +233,11 @@ struct SocketBridgeTests {
     }
 
     /// `stop()` must release a blocked client read via shutdown (not hang on close alone).
+    ///
+    /// The client `read` is bounded with `SO_RCVTIMEO` so the test is self-terminating
+    /// even if `stop()` fails to unblock the peer: the syscall returns, the fd is closed
+    /// via `defer`, and no detached task/thread is left blocked forever. Success still
+    /// requires a peer-driven EOF/error (not the receive timeout alone).
     @Test func stopUnblocksIdleClientReadViaShutdown() async throws {
         let (temp, cleanup) = try TestSupport.makeShortSocketRoot(prefix: "nu")
         defer { cleanup() }
@@ -223,10 +248,15 @@ struct SocketBridgeTests {
         try await Task.sleep(for: .milliseconds(50))
 
         let pathString = socketURL.path
-        let idleClient = Task.detached {
+        // Safety net only: long enough that a prompt stop→shutdown cannot race it.
+        // If stop fails, Darwin.read returns after this bound instead of hanging.
+        let receiveSafetySeconds: time_t = 3
+
+        let idleClient = Task.detached { () -> IdleClientReadResult in
             let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-            guard fd >= 0 else { return false }
+            guard fd >= 0 else { return .setupFailed }
             defer { Darwin.close(fd) }
+
             var addr = sockaddr_un()
             addr.sun_family = sa_family_t(AF_UNIX)
             pathString.withCString { src in
@@ -239,11 +269,38 @@ struct SocketBridgeTests {
                     Darwin.connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
                 }
             } == 0
-            guard connected else { return false }
-            // Block in read until server shutdown/close delivers EOF/error.
+            guard connected else { return .setupFailed }
+
+            // Bound the blocking read so a failed stop cannot leak this thread/fd.
+            var timeout = timeval(tv_sec: receiveSafetySeconds, tv_usec: 0)
+            let timeoutApplied = setsockopt(
+                fd,
+                SOL_SOCKET,
+                SO_RCVTIMEO,
+                &timeout,
+                socklen_t(MemoryLayout<timeval>.size)
+            ) == 0
+            guard timeoutApplied else { return .setupFailed }
+
             var buf = [UInt8](repeating: 0, count: 8)
             let n = Darwin.read(fd, &buf, buf.count)
-            return n <= 0
+            let readErrno = errno
+
+            if n == 0 {
+                // Peer shutdown/close delivered EOF — the behavior under test.
+                return .releasedByPeer
+            }
+            if n < 0 {
+                // SO_RCVTIMEO on Darwin surfaces as EAGAIN / EWOULDBLOCK when no data
+                // arrived before the bound. That means stop did not release the read.
+                if readErrno == EAGAIN || readErrno == EWOULDBLOCK {
+                    return .receiveTimedOut
+                }
+                // Other errors (e.g. ECONNRESET after peer teardown) still prove release.
+                return .releasedByPeer
+            }
+            // Unexpected payload; still unblocked without waiting for SO_RCVTIMEO.
+            return .releasedByPeer
         }
 
         try await Task.sleep(for: .milliseconds(80))
@@ -253,18 +310,21 @@ struct SocketBridgeTests {
         let stopElapsed = ContinuousClock.now - stopStarted
         #expect(stopElapsed < .seconds(2))
 
-        let readReleased = await withTaskGroup(of: Bool.self) { group in
-            group.addTask { await idleClient.value }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(2))
-                return false
-            }
-            let first = await group.next() ?? false
-            group.cancelAll()
-            return first
-        }
-        #expect(readReleased)
+        // Awaits a task that always finishes within ~SO_RCVTIMEO; no cancel-based
+        // timeout is needed, so a failing stop cannot leave a blocked syscall behind.
+        let readResult = await idleClient.value
+        #expect(readResult == .releasedByPeer)
     }
+}
+
+/// Outcome of the bounded idle-client read used by ``SocketBridgeTests``.
+private enum IdleClientReadResult: Sendable, Equatable {
+    /// Connect or `SO_RCVTIMEO` setup failed before the blocking read.
+    case setupFailed
+    /// `read` returned EOF/error from peer shutdown/close (success for the regression).
+    case releasedByPeer
+    /// `SO_RCVTIMEO` fired — `stop()` did not unblock the client (self-terminated).
+    case receiveTimedOut
 }
 
 // MARK: - Jump-back scheme validation

@@ -13,7 +13,7 @@
 | `EventSocketServer` / `EventSocketClient` | Multi-client NDJSON; **off-actor client reads**; cancel-safe stop (**`shutdown` + close** idle clients); `SO_NOSIGPIPE` |
 | `SessionStore` | Cap/prune; **stale events never rewind/revive terminal or promote ordering**; mismatched approval/question IDs are no-ops; `replaceAll` last-wins without trap |
 | Decoders | Codex + Claude implemented sets; metrics by **inferred** source; epoch timestamps via shared parser (**≥ 1e12 = ms**); incomplete envelope fast-path rejected; malformed/`v` uses `exactIntValue` fallback |
-| Persistence | Atomic JSON; corrupt quarantine; **`deleteAll` removes regular non-symlink files only**; disjoint **`records/`** path namespace + case-stable encoding |
+| Persistence | Atomic JSON; corrupt quarantine; **`deleteAll` / `loadAll` only touch regular non-symlink `*.json`** (skip FIFO/socket/symlink before read); **`loadAll` duplicate ranking**: newest `updatedAt` → canonical path → lexical standardized path; disjoint **`records/`** path namespace + case-stable encoding |
 | `ResponseTransport` | Envelope + **subdir sidecars** (`codex/`, `claude/`, `answer/`) — no flat namespace collision with `codex-x` |
 | `JumpBackCoordinator` | Codex schemes allowlisted (`codex`, `openai-codex`); AppleScript on **MainActor** |
 | Settings | Schema v2; **never downgrade/rewrite newer schema (e.g. 99)**; load is read-only; **`update(_:)` / `canSave()`** for safe UI writes |
@@ -23,7 +23,7 @@
 
 ## Migration / compatibility notes (2026-07-13 robustness pass)
 
-1. **Session / response filenames** use a disjoint **`records/`** subdirectory for canonical writes plus **case-stable** `PathComponentEncoding` (uppercase ASCII is percent-encoded). Reads try: `…/records/<body>` → flat prior `n.<body>` → flat unprefixed percent-encode → legacy `/`+`:` → `_` sanitize. New writes never use a flat `n.` filename prefix (that layout collided: id `foo` → `n.foo.json` vs literal id `n.foo`). **Embedded `Session.id` is authoritative** before any migrate/delete; migration never overwrites a foreign canonical record.
+1. **Session / response filenames** use a disjoint **`records/`** subdirectory for canonical writes plus **case-stable** `PathComponentEncoding` (uppercase ASCII is percent-encoded). Reads try: `…/records/<body>` → flat prior `n.<body>` → flat unprefixed percent-encode → legacy `/`+`:` → `_` sanitize. New writes never use a flat `n.` filename prefix (that layout collided: id `foo` → `n.foo.json` vs literal id `n.foo`). **Embedded `Session.id` is authoritative** before any migrate/delete; migration never overwrites a foreign canonical record. **`loadAll` same-id duplicates** keep the newest `updatedAt` (canonical is only a timestamp tie-breaker, then lexical path) so stale canonical never rewinds fresher legacy.
 2. **Response sidecars** live under `responses/codex/<encoded>.json` (same for `claude/`, `answer/`). Envelopes live under `responses/records/`.
 3. **Settings:** loading a schemaVersion `> current` leaves the file untouched; `SettingsStore.save` throws `newerSchemaOnDisk`. Older schemas migrate in-memory only (no save-on-load). Prefer `settingsStore.update { … }` over mutate-then-`try? save`. **UI (`AppModel.updateSettings`) assigns published settings only after a successful update.**
 4. **Claude `permission_mode`:** only `ask` / `default` / `prompt` create approvals; `none` / `off` / `allow` / `bypassPermissions` / `acceptEdits` / etc. do not.

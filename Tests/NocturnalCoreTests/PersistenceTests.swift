@@ -280,6 +280,303 @@ struct PersistenceTests {
         unlink(fifoPath)
     }
 
+    // MARK: - loadAll duplicate ranking + file-kind safety
+
+    /// Encode a session with ISO-8601 dates (matches persistence encoder strategy).
+    private func encodeSessionJSON(_ session: Session) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(session)
+    }
+
+    private func writeSessionJSON(_ session: Session, to url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try encodeSessionJSON(session).write(to: url, options: [.atomic])
+    }
+
+    /// Finding 1: fresher legacy must beat stale canonical (never rewind on hydrate).
+    @Test func loadAllPrefersNewerLegacyOverStaleCanonical() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-dup-newer")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+        let persistence = SessionPersistence(paths: paths)
+
+        let id = SessionID("dup-newer")
+        let older = Date(timeIntervalSince1970: 1_700_000_000)
+        let newer = Date(timeIntervalSince1970: 1_700_100_000)
+
+        let staleCanonical = Session(
+            id: id,
+            source: .codex,
+            state: .idle,
+            title: "Stale canonical",
+            createdAt: older,
+            updatedAt: older
+        )
+        let freshLegacy = Session(
+            id: id,
+            source: .codex,
+            state: .running,
+            title: "Fresh legacy",
+            createdAt: older,
+            updatedAt: newer
+        )
+        try writeSessionJSON(staleCanonical, to: paths.sessionFile(for: id))
+        try writeSessionJSON(freshLegacy, to: paths.legacySessionFile(for: id))
+
+        let loaded = try await persistence.loadAll()
+        #expect(loaded.count == 1)
+        #expect(loaded.first?.title == "Fresh legacy")
+        #expect(loaded.first?.state == .running)
+        #expect(loaded.first?.updatedAt == newer)
+    }
+
+    /// Finding 2 (tie-break): equal `updatedAt` → canonical wins over legacy.
+    @Test func loadAllPrefersCanonicalOnEqualUpdatedAt() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-dup-tie-can")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+        let persistence = SessionPersistence(paths: paths)
+
+        let id = SessionID("dup-tie")
+        let stamp = Date(timeIntervalSince1970: 1_700_050_000)
+        let canonical = Session(
+            id: id,
+            source: .claude,
+            state: .completed,
+            title: "Canonical winner",
+            createdAt: stamp,
+            updatedAt: stamp
+        )
+        let legacy = Session(
+            id: id,
+            source: .claude,
+            state: .failed,
+            title: "Legacy loser",
+            createdAt: stamp,
+            updatedAt: stamp
+        )
+        // Write legacy first so if order-only logic preferred later files incorrectly
+        // after a time tie, we still prove canonical ranking (not enumeration).
+        try writeSessionJSON(legacy, to: paths.legacySessionFile(for: id))
+        try writeSessionJSON(canonical, to: paths.sessionFile(for: id))
+
+        let loaded = try await persistence.loadAll()
+        #expect(loaded.count == 1)
+        #expect(loaded.first?.title == "Canonical winner")
+        #expect(loaded.first?.state == .completed)
+    }
+
+    /// Finding 2: equal-time noncanonical ties use lexical standardized path (stable).
+    /// Exercised via the pure ranking seam so enumeration order cannot hide the policy.
+    @Test func equalTimeNoncanonicalDuplicateRankingIsLexicalStable() {
+        let stamp = Date(timeIntervalSince1970: 1_700_060_000)
+        let id = SessionID("lex-tie")
+        let sessionA = Session(
+            id: id,
+            source: .codex,
+            state: .running,
+            title: "Path A",
+            createdAt: stamp,
+            updatedAt: stamp
+        )
+        let sessionB = Session(
+            id: id,
+            source: .codex,
+            state: .idle,
+            title: "Path B",
+            createdAt: stamp,
+            updatedAt: stamp
+        )
+        let pathEarlier = "/tmp/sessions/a_legacy.json"
+        let pathLater = "/tmp/sessions/z_legacy.json"
+        let earlier = SessionPersistence.DuplicateHydrationCandidate(
+            session: sessionA,
+            isCanonical: false,
+            standardizedPath: pathEarlier
+        )
+        let later = SessionPersistence.DuplicateHydrationCandidate(
+            session: sessionB,
+            isCanonical: false,
+            standardizedPath: pathLater
+        )
+
+        // Either enumeration order → same winner (lexicographically smaller path).
+        #expect(SessionPersistence.shouldPrefer(earlier, over: later))
+        #expect(SessionPersistence.shouldPrefer(later, over: earlier) == false)
+
+        // Simulate folding both orders into one winner.
+        func winner(
+            first: SessionPersistence.DuplicateHydrationCandidate,
+            second: SessionPersistence.DuplicateHydrationCandidate
+        ) -> String {
+            var best = first
+            if SessionPersistence.shouldPrefer(second, over: best) {
+                best = second
+            }
+            return best.standardizedPath
+        }
+        #expect(winner(first: earlier, second: later) == pathEarlier)
+        #expect(winner(first: later, second: earlier) == pathEarlier)
+    }
+
+    /// Pure ranking: newer timestamp beats canonical preference.
+    @Test func duplicateRankingPrefersNewerUpdatedAtOverCanonical() {
+        let id = SessionID("rank-time")
+        let older = Date(timeIntervalSince1970: 1_000)
+        let newer = Date(timeIntervalSince1970: 2_000)
+        let staleCanonical = SessionPersistence.DuplicateHydrationCandidate(
+            session: Session(
+                id: id,
+                source: .codex,
+                state: .idle,
+                title: "canonical-old",
+                updatedAt: older
+            ),
+            isCanonical: true,
+            standardizedPath: "/records/rank-time.json"
+        )
+        let freshLegacy = SessionPersistence.DuplicateHydrationCandidate(
+            session: Session(
+                id: id,
+                source: .codex,
+                state: .running,
+                title: "legacy-new",
+                updatedAt: newer
+            ),
+            isCanonical: false,
+            standardizedPath: "/sessions/rank-time.json"
+        )
+        #expect(SessionPersistence.shouldPrefer(freshLegacy, over: staleCanonical))
+        #expect(SessionPersistence.shouldPrefer(staleCanonical, over: freshLegacy) == false)
+    }
+
+    /// Finding 3: FIFO / socket / symlink `*.json` are skipped (no block, no quarantine).
+    @Test(.timeLimit(.minutes(1)))
+    func loadAllSkipsFifoSocketAndSymlinkJSONWithoutBlocking() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-load-special")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+        // quarantineCorrupt true would move corrupt regulars; specials must never be opened.
+        let persistence = SessionPersistence(paths: paths, quarantineCorrupt: true)
+
+        let good = Session(
+            id: SessionID("good-special"),
+            source: .codex,
+            state: .idle,
+            title: "Good regular"
+        )
+        try await persistence.save(good)
+
+        let sessionsDir = paths.sessionsDirectory
+
+        // Symlink named *.json → valid target (must not be followed or quarantined).
+        let target = temp.appendingPathComponent("symlink-target.json")
+        try writeSessionJSON(
+            Session(id: SessionID("via-link"), source: .claude, state: .running, title: "Linked"),
+            to: target
+        )
+        let symlink = sessionsDir.appendingPathComponent("link.json")
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: target)
+
+        // FIFO named *.json — opening with Data(contentsOf:) would block forever.
+        let fifoURL = sessionsDir.appendingPathComponent("pipe.json")
+        let fifoOK = mkfifo(fifoURL.path, 0o644) == 0
+        #expect(fifoOK)
+
+        // Unix domain socket named *.json — must not be read or moved.
+        let socketURL = sessionsDir.appendingPathComponent("ipc.json")
+        try createUnixDomainSocketFile(at: socketURL)
+        defer {
+            try? FileManager.default.removeItem(at: symlink)
+            unlink(fifoURL.path)
+            unlink(socketURL.path)
+        }
+
+        // File-kind seam: specials rejected, regular accepted.
+        #expect(SessionPersistence.isRegularNonSymlinkFile(symlink, fileManager: .default) == false)
+        #expect(SessionPersistence.isRegularNonSymlinkFile(fifoURL, fileManager: .default) == false)
+        #expect(SessionPersistence.isRegularNonSymlinkFile(socketURL, fileManager: .default) == false)
+        #expect(
+            SessionPersistence.isRegularNonSymlinkFile(
+                paths.sessionFile(for: good.id),
+                fileManager: .default
+            )
+        )
+
+        let loaded = try await persistence.loadAll()
+        #expect(loaded.count == 1)
+        #expect(loaded.first?.id == good.id)
+        #expect(loaded.first?.title == "Good regular")
+
+        // Specials untouched (not unlinked, not quarantined).
+        #expect(FileManager.default.fileExists(atPath: symlink.path))
+        #expect(FileManager.default.fileExists(atPath: fifoURL.path))
+        #expect(FileManager.default.fileExists(atPath: socketURL.path))
+        #expect(FileManager.default.fileExists(atPath: target.path))
+
+        let quarantineDir = paths.root.appendingPathComponent("corrupt-sessions", isDirectory: true)
+        let quarantined = (try? FileManager.default.contentsOfDirectory(
+            at: quarantineDir,
+            includingPropertiesForKeys: nil
+        )) ?? []
+        #expect(quarantined.isEmpty)
+
+        let skipped = await persistence.lastLoadSkipped
+        #expect(skipped.isEmpty)
+    }
+
+    /// Bind a temporary AF_UNIX socket so a socket inode exists at `url`, then close the fd.
+    ///
+    /// Bind uses a short `/tmp` path (sun_path is ~104 bytes on Darwin), then moves the
+    /// inode into `url` so loadAll sees a socket named `*.json` under sessions/.
+    private func createUnixDomainSocketFile(at url: URL) throws {
+        let shortPath = "/tmp/n-\(getpid())-\(UUID().uuidString.prefix(8)).sock"
+        let shortURL = URL(fileURLWithPath: shortPath)
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            throw PersistenceError.ioFailed("socket() failed")
+        }
+        defer {
+            close(fd)
+            unlink(shortPath)
+        }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let maxLen = MemoryLayout.size(ofValue: addr.sun_path) - 1
+        let pathBytes = Array(shortPath.utf8)
+        guard pathBytes.count <= maxLen else {
+            throw PersistenceError.ioFailed("socket path too long")
+        }
+        withUnsafeMutableBytes(of: &addr.sun_path) { buf in
+            buf.initializeMemory(as: UInt8.self, repeating: 0)
+            for (i, b) in pathBytes.enumerated() {
+                buf[i] = b
+            }
+        }
+        unlink(shortPath)
+        let bindResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                bind(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard bindResult == 0 else {
+            throw PersistenceError.ioFailed("bind() failed for test socket")
+        }
+
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        // Move the socket inode into the sessions tree (destination may be a long path).
+        unlink(url.path)
+        try FileManager.default.moveItem(at: shortURL, to: url)
+    }
+
     @Test func loadMigratesPriorEncodedFileAfterEmbeddedIdCheck() async throws {
         let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-prior-mig")
         defer { cleanup() }

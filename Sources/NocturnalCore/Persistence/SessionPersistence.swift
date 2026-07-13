@@ -110,22 +110,27 @@ public actor SessionPersistence {
             throw PersistenceError.ioFailed(error.localizedDescription)
         }
 
-        // Prefer canonical `records/` content when the same id appears mid-migration.
-        var sessionsByID: [SessionID: (session: Session, fromCanonical: Bool)] = [:]
+        // Duplicate IDs (canonical + legacy mid-migration, or overlapping prior layouts)
+        // resolve via ``shouldPrefer(_:over:)`` — newest `updatedAt` wins; canonical and
+        // path are tie-breakers only (never rewind fresher legacy behind stale canonical).
+        var sessionsByID: [SessionID: DuplicateHydrationCandidate] = [:]
         for url in urls {
             do {
                 let data = try Data(contentsOf: url)
                 let session = try decoder.decode(Session.self, from: data)
+                let standardizedPath = url.standardizedFileURL.path
                 let canonicalPath = paths.sessionFile(for: session.id).standardizedFileURL.path
-                let isCanonical = url.standardizedFileURL.path == canonicalPath
+                let candidate = DuplicateHydrationCandidate(
+                    session: session,
+                    isCanonical: standardizedPath == canonicalPath,
+                    standardizedPath: standardizedPath
+                )
                 if let existing = sessionsByID[session.id] {
-                    if isCanonical {
-                        sessionsByID[session.id] = (session, true)
-                    } else if !existing.fromCanonical, session.updatedAt >= existing.session.updatedAt {
-                        sessionsByID[session.id] = (session, false)
+                    if Self.shouldPrefer(candidate, over: existing) {
+                        sessionsByID[session.id] = candidate
                     }
                 } else {
-                    sessionsByID[session.id] = (session, isCanonical)
+                    sessionsByID[session.id] = candidate
                 }
             } catch {
                 lastLoadSkipped.append(url.lastPathComponent)
@@ -192,7 +197,7 @@ public actor SessionPersistence {
             }
 
             for url in urls {
-                guard Self.isRemovableSessionFile(url, fileManager: fileManager) else { continue }
+                guard Self.isRegularNonSymlinkFile(url, fileManager: fileManager) else { continue }
 
                 do {
                     try fileManager.removeItem(at: url)
@@ -206,8 +211,42 @@ public actor SessionPersistence {
         }
     }
 
-    /// Regular files only — never directories, symlinks, FIFOs, or sockets.
-    private static func isRemovableSessionFile(_ url: URL, fileManager: FileManager) -> Bool {
+    // MARK: - Duplicate hydration ranking
+
+    /// One decoded session file considered while collapsing same-id duplicates in ``loadAll()``.
+    struct DuplicateHydrationCandidate: Sendable, Equatable {
+        var session: Session
+        var isCanonical: Bool
+        var standardizedPath: String
+    }
+
+    /// Deterministic winner among duplicate session files for the same id.
+    ///
+    /// Ranking (first decisive difference wins):
+    /// 1. Newer `updatedAt` always wins (stale canonical must not rewind fresher legacy).
+    /// 2. On equal `updatedAt`, the canonical `records/` path wins.
+    /// 3. Still tied: lexicographically smaller standardized path (stable under directory
+    ///    enumeration order).
+    nonisolated static func shouldPrefer(
+        _ candidate: DuplicateHydrationCandidate,
+        over existing: DuplicateHydrationCandidate
+    ) -> Bool {
+        if candidate.session.updatedAt != existing.session.updatedAt {
+            return candidate.session.updatedAt > existing.session.updatedAt
+        }
+        if candidate.isCanonical != existing.isCanonical {
+            return candidate.isCanonical
+        }
+        return candidate.standardizedPath < existing.standardizedPath
+    }
+
+    // MARK: - File-kind safety
+
+    /// Regular, non-symlink files only — never directories, symlinks, FIFOs, or sockets.
+    ///
+    /// Used by ``loadAll()`` (skip before `Data(contentsOf:)`, which blocks on FIFOs) and
+    /// ``deleteAll()`` (never unlink special nodes). Does not follow symlinks.
+    nonisolated static func isRegularNonSymlinkFile(_ url: URL, fileManager: FileManager) -> Bool {
         if let values = try? url.resourceValues(forKeys: [
             .isDirectoryKey,
             .isRegularFileKey,
@@ -218,7 +257,7 @@ public actor SessionPersistence {
             if values.isRegularFile == true { return true }
             return false
         }
-        // Fallback when resource values are unavailable: POSIX mode check.
+        // Fallback when resource values are unavailable: POSIX mode check (no follow).
         guard let attrs = try? fileManager.attributesOfItem(atPath: url.path),
               let type = attrs[.type] as? FileAttributeType
         else {
@@ -228,6 +267,7 @@ public actor SessionPersistence {
     }
 
     /// JSON session candidates: flat files under `sessions/` plus files in `records/`.
+    /// Only **regular non-symlink** `*.json` files are included.
     private static func sessionJSONFiles(
         under sessionsDirectory: URL,
         recordsDirectory: URL,
@@ -240,15 +280,17 @@ public actor SessionPersistence {
             guard fileManager.fileExists(atPath: directory.path) else { return }
             let urls = try fileManager.contentsOfDirectory(
                 at: directory,
-                includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
+                includingPropertiesForKeys: [
+                    .isDirectoryKey,
+                    .isRegularFileKey,
+                    .isSymbolicLinkKey,
+                ],
                 options: [.skipsHiddenFiles]
             )
             for url in urls {
-                var isDir: ObjCBool = false
-                guard fileManager.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else {
-                    continue
-                }
                 guard url.pathExtension == "json" else { continue }
+                // Skip FIFO/socket/symlink before any read — FIFO can block forever.
+                guard isRegularNonSymlinkFile(url, fileManager: fileManager) else { continue }
                 let key = url.standardizedFileURL.path
                 if seen.insert(key).inserted {
                     result.append(url)
