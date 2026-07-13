@@ -58,6 +58,7 @@ struct SessionPanelView: View {
         .background(listBackground)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Session list, \(sessions.count) sessions")
+        .accessibilityHint("Up and Down arrows change selection. A approves, D denies the selected session.")
     }
 
     @ViewBuilder
@@ -141,7 +142,11 @@ struct EmptySessionsView: View {
                 .foregroundStyle(NocturnalPalette.bgBase)
                 .controlSize(isCompact ? .small : .regular)
                 .accessibilityLabel("Copy setup command")
-                .accessibilityHint(model.setupInstallCommand)
+                .accessibilityHint("Copies setup command to the clipboard")
+                // Expose the actual command as value so VO/compact menu bar still
+                // discover it without painting a second monospaced line in compact UI.
+                .accessibilityValue(model.setupInstallCommand)
+                .help(model.setupInstallCommand)
 
                 if !isCompact {
                     Button {
@@ -165,7 +170,8 @@ struct EmptySessionsView: View {
                     .textSelection(.enabled)
                     .multilineTextAlignment(.center)
                     .padding(.top, 2)
-                    .accessibilityLabel("Setup command: \(model.setupInstallCommand)")
+                    .accessibilityLabel("Setup command")
+                    .accessibilityValue(model.setupInstallCommand)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

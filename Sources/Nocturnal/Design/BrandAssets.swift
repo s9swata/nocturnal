@@ -2,13 +2,20 @@ import AppKit
 import SwiftUI
 
 /// Centralized brand image loading — never hardcode resource paths in views.
+///
+/// Bundled source images are cached immutably. Call sites always receive a **copy**
+/// before size / template mutations so repeated SwiftUI body evaluations neither
+/// re-read resources from disk nor mutate shared named images.
 enum BrandAssets {
     static let owlMarkResourceName = "nocturnal-owl-mark"
     static let appIconResourceName = "nocturnal-app-icon"
 
+    /// Thread-safe immutable source cache. Entries are never mutated after insert.
+    private static let sourceCache = ImageSourceCache()
+
     /// Transparent owl mark as a template-ready `NSImage` (menu bar, monochrome chrome).
     static func owlMarkNSImage(size: CGFloat? = nil) -> NSImage? {
-        guard let image = loadNSImage(named: owlMarkResourceName) else { return nil }
+        guard let image = mutableCopyOfSource(named: owlMarkResourceName) else { return nil }
         image.isTemplate = true
         if let size {
             image.size = NSSize(width: size, height: size)
@@ -18,14 +25,52 @@ enum BrandAssets {
 
     /// Full-color / full-bleed app icon source (about surfaces, dock packaging).
     static func appIconNSImage(size: CGFloat? = nil) -> NSImage? {
-        guard let image = loadNSImage(named: appIconResourceName) else { return nil }
+        guard let image = mutableCopyOfSource(named: appIconResourceName) else { return nil }
         if let size {
             image.size = NSSize(width: size, height: size)
         }
         return image
     }
 
+    /// Returns a detached copy of the cached source, or loads and caches once.
+    private static func mutableCopyOfSource(named name: String) -> NSImage? {
+        guard let source = sourceCache.image(named: name, load: { loadNSImageFromBundle(named: name) })
+        else { return nil }
+        // Copy before any size / isTemplate mutation so the cache stays pristine.
+        guard let copy = source.copy() as? NSImage else {
+            // Fallback: re-load a fresh instance rather than mutating the shared cache.
+            return loadNSImageFromBundle(named: name)
+        }
+        return copy
+    }
+
+    /// Lock-backed cache for bundled sources (`@unchecked Sendable` via internal mutex).
+    private final class ImageSourceCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [String: NSImage] = [:]
+
+        func image(named name: String, load: () -> NSImage?) -> NSImage? {
+            lock.lock()
+            defer { lock.unlock() }
+            if let cached = storage[name] {
+                return cached
+            }
+            guard let loaded = load() else { return nil }
+            storage[name] = loaded
+            return loaded
+        }
+    }
+
+    /// Disk / bundle load only — not for direct call sites that mutate the result.
     static func loadNSImage(named name: String) -> NSImage? {
+        // Public entry for tests / diagnostics: always returns a fresh copy when cached.
+        if let image = mutableCopyOfSource(named: name) {
+            return image
+        }
+        return loadNSImageFromBundle(named: name)
+    }
+
+    private static func loadNSImageFromBundle(named name: String) -> NSImage? {
         // SPM resource bundle for the Nocturnal executable target.
         if let url = Bundle.module.url(forResource: name, withExtension: "png", subdirectory: "Brand"),
            let image = NSImage(contentsOf: url)
@@ -48,6 +93,7 @@ enum BrandAssets {
         {
             return image
         }
+        // Named lookup last; do not cache NSImage(named:) results without copying at use.
         return NSImage(named: name)
     }
 }

@@ -163,6 +163,78 @@ struct EventDecodingTests {
         #expect(decoded.approval?.toolName == "Write")
     }
 
+    @Test(arguments: ["ask", "default", "prompt", "ASK", "Default"])
+    func claudePermissionModesRequiringApproval(mode: String) {
+        let decoder = ClaudeEventDecoder()
+        let decoded = decoder.decode(EventEnvelope(
+            source: .claude,
+            eventType: "PreToolUse",
+            sessionId: "pre-ask",
+            payload: [
+                "tool_name": .string("Bash"),
+                "permission_mode": .string(mode),
+            ]
+        ))
+        #expect(decoded.state == .waitingForApproval)
+        #expect(decoded.approval != nil)
+    }
+
+    @Test(arguments: [
+        "none", "off", "allow", "bypassPermissions", "bypass_permissions",
+        "dontAsk", "acceptEdits", "ACCEPTEdits",
+    ])
+    func claudePermissionModesDoNotCreateFalseApproval(mode: String) {
+        let decoder = ClaudeEventDecoder()
+        let decoded = decoder.decode(EventEnvelope(
+            source: .claude,
+            eventType: "PreToolUse",
+            sessionId: "pre-auto",
+            payload: [
+                "tool_name": .string("Bash"),
+                "permission_mode": .string(mode),
+            ]
+        ))
+        #expect(decoded.state == .running)
+        #expect(decoded.approval == nil)
+    }
+
+    @Test func codexPidConversionIsRangeSafe() {
+        let decoder = CodexEventDecoder()
+
+        let ok = decoder.decode(EventEnvelope(
+            source: .codex,
+            eventType: "session.started",
+            sessionId: "pid-ok",
+            payload: ["pid": .number(12345), "title": .string("t")]
+        ))
+        #expect(ok.jumpBack?.processIdentifier == 12345)
+
+        // Oversized / non-integral must not trap.
+        let huge = decoder.decode(EventEnvelope(
+            source: .codex,
+            eventType: "session.started",
+            sessionId: "pid-huge",
+            payload: ["pid": .number(Double.greatestFiniteMagnitude), "title": .string("t")]
+        ))
+        #expect(huge.jumpBack?.processIdentifier == nil)
+
+        let fractional = decoder.decode(EventEnvelope(
+            source: .codex,
+            eventType: "session.started",
+            sessionId: "pid-frac",
+            payload: ["process_id": .number(12.5), "title": .string("t")]
+        ))
+        #expect(fractional.jumpBack?.processIdentifier == nil)
+
+        let negativeOverflow = decoder.decode(EventEnvelope(
+            source: .codex,
+            eventType: "session.started",
+            sessionId: "pid-neg",
+            payload: ["pid": .number(-9_000_000_000), "title": .string("t")]
+        ))
+        #expect(negativeOverflow.jumpBack?.processIdentifier == nil)
+    }
+
     // MARK: - Normalizer & composite
 
     @Test func envelopeNormalizerWrapsRawClaudeStdin() throws {
@@ -194,6 +266,53 @@ struct EventDecodingTests {
         #expect(metrics.total == 2)
         #expect(metrics.unknown == 1)
         #expect(metrics.bySource["codex"] == 2)
+    }
+
+    @Test func metricsAttributeToInferredSourceWhenWireSourceUnknown() {
+        let composite = CompositeEventDecoder()
+        _ = composite.decode(EventEnvelope(
+            source: .unknown,
+            eventType: "session.started",
+            sessionId: "inf-1",
+            payload: ["title": .string("Inferred codex")]
+        ))
+        _ = composite.decode(EventEnvelope(
+            source: .unknown,
+            eventType: "SessionStart",
+            sessionId: "inf-2",
+            payload: ["title": .string("Inferred claude")]
+        ))
+        let metrics = composite.currentMetrics()
+        #expect(metrics.total == 2)
+        #expect(metrics.bySource["codex"] == 1)
+        #expect(metrics.bySource["claude"] == 1)
+        #expect(metrics.bySource["unknown"] == nil || metrics.bySource["unknown"] == 0)
+    }
+
+    @Test func normalizerRejectsSessionIdOnlyFastPath() throws {
+        let line = Data(#"{"sessionId":"only-sid","cwd":"/tmp/project","hook_event_name":"SessionStart"}"#.utf8)
+        let normalizer = EnvelopeNormalizer(defaultSource: .unknown)
+        let envelope = normalizer.normalize(line: line)
+        let unwrapped = try #require(envelope)
+        // Must normalize upstream fields, not stop at incomplete envelope decode.
+        #expect(unwrapped.eventType == "SessionStart")
+        #expect(unwrapped.sessionId == "only-sid")
+        #expect(unwrapped.payload["cwd"] == .string("/tmp/project")
+            || unwrapped.raw["cwd"] == .string("/tmp/project"))
+        #expect(unwrapped.source == .claude)
+    }
+
+    @Test func normalizerPreservesNumericEpochTimestamps() throws {
+        let epoch: Double = 1_700_000_000
+        let line = Data(#"{"v":1,"id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","source":"codex","eventType":"session.started","sessionId":"epoch-1","timestamp":1700000000,"payload":{"title":"E"},"raw":{}}"#.utf8)
+        let normalizer = EnvelopeNormalizer()
+        let envelope = try #require(normalizer.normalize(line: line))
+        #expect(abs(envelope.timestamp.timeIntervalSince1970 - epoch) < 1)
+
+        // Milliseconds heuristic.
+        let msLine = Data(#"{"hook_event_name":"SessionStart","session_id":"ms-1","timestamp":1700000000000}"#.utf8)
+        let msEnv = try #require(normalizer.normalize(line: msLine))
+        #expect(abs(msEnv.timestamp.timeIntervalSince1970 - epoch) < 1)
     }
 
     @Test func implementedEventTypeSetsAreNonEmpty() {

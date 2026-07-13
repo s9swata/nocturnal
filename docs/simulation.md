@@ -49,6 +49,14 @@ BIN=.build/debug   # or .build/*-apple-macosx/debug
 cat Fixtures/codex/session-started.ndjson | "$BIN/nocturnal-hook-forwarder"
 cat Fixtures/codex/approval-required.ndjson | "$BIN/nocturnal-hook-forwarder"
 cat Fixtures/claude/session-lifecycle.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source claude
+
+# Bad flags must not steal values (still exit 0 — fail-open):
+"$BIN/nocturnal-hook-forwarder" --socket --timeout 1 </dev/null
+
+# Setup: missing flag values are usage errors (exit 2), not silent defaults:
+"$BIN/nocturnal-setup" install --product          # error
+"$BIN/nocturnal-setup" install --forwarder        # error
+"$BIN/nocturnal-setup" install --product codex --dry-run
 ```
 
 ## Question / answer path

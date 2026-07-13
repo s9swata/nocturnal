@@ -301,8 +301,8 @@ final class OverlayController {
 
     private func installScreenObservers() {
         removeScreenObservers()
-        let center = NotificationCenter.default
-        screenObserver = center.addObserver(
+        // Screen geometry changes post on the default center.
+        screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil,
             queue: .main
@@ -312,7 +312,8 @@ final class OverlayController {
                 self.positionPanel(expanded: model.isOverlayExpanded)
             }
         }
-        spaceObserver = center.addObserver(
+        // Space changes post on NSWorkspace's notification center (not default).
+        spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification,
             object: nil,
             queue: .main
@@ -329,7 +330,7 @@ final class OverlayController {
             self.screenObserver = nil
         }
         if let spaceObserver {
-            NotificationCenter.default.removeObserver(spaceObserver)
+            NSWorkspace.shared.notificationCenter.removeObserver(spaceObserver)
             self.spaceObserver = nil
         }
     }

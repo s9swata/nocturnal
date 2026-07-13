@@ -1,6 +1,13 @@
 import Foundation
 
 /// User preferences persisted locally as JSON. No telemetry, no accounts.
+///
+/// **Schema policy**
+/// - Only **older** schema versions are migrated forward to ``currentSchemaVersion``.
+/// - Files from a **newer** schema (e.g. future app builds) are never downgraded
+///   or rewritten on load. Callers must not treat ``load()`` as a save trigger.
+/// - ``SettingsStore/save(_:)`` refuses to overwrite an on-disk file whose
+///   `schemaVersion` is greater than this binary understands.
 public struct AppSettings: Codable, Sendable, Equatable {
     /// Schema version for migrations.
     public var schemaVersion: Int
@@ -39,15 +46,18 @@ public struct AppSettings: Codable, Sendable, Equatable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 0
+        let onDiskVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 0
         reduceMotion = try container.decodeIfPresent(Bool.self, forKey: .reduceMotion) ?? false
         soundEnabled = try container.decodeIfPresent(Bool.self, forKey: .soundEnabled) ?? false
         showFloatingPill = try container.decodeIfPresent(Bool.self, forKey: .showFloatingPill) ?? true
         maxVisibleSessions = try container.decodeIfPresent(Int.self, forKey: .maxVisibleSessions) ?? 12
         // Obsolete product key `demoMode` is intentionally ignored (tolerant decode).
-        // Migrate forward: stamp current schema after load.
-        if schemaVersion < AppSettings.currentSchemaVersion {
+        // Migrate only older schemas forward. Preserve newer schema versions as-is
+        // so a future file is never silently downgraded by this binary.
+        if onDiskVersion < AppSettings.currentSchemaVersion {
             schemaVersion = AppSettings.currentSchemaVersion
+        } else {
+            schemaVersion = onDiskVersion
         }
     }
 
@@ -61,7 +71,17 @@ public struct AppSettings: Codable, Sendable, Equatable {
     }
 }
 
+public enum SettingsStoreError: Error, Sendable, Equatable {
+    /// On-disk settings use a schema newer than this binary; refuse to overwrite.
+    case newerSchemaOnDisk(onDisk: Int, supported: Int)
+    case encodingFailed
+    case ioFailed(String)
+}
+
 /// Loads/saves ``AppSettings`` from the persistence root.
+///
+/// **Load never writes.** Migration of older schemas is applied in-memory only;
+/// callers must invoke ``save(_:)`` explicitly if they want to persist a migration.
 public actor SettingsStore {
     private let paths: PersistencePaths
     private let fileManager: FileManager
@@ -88,15 +108,13 @@ public actor SettingsStore {
         }
         do {
             let data = try Data(contentsOf: url)
-            var settings = try decoder.decode(AppSettings.self, from: data)
-            // Ensure migrated schema is written back eventually by callers of save.
-            if settings.schemaVersion != AppSettings.currentSchemaVersion {
-                settings.schemaVersion = AppSettings.currentSchemaVersion
-            }
+            // Decode only — never rewrite the file on load (preserves unknown keys
+            // and newer schema files until an explicit save from a capable binary).
+            let settings = try decoder.decode(AppSettings.self, from: data)
             cached = settings
             return settings
         } catch {
-            // Corruption recovery: fall back to defaults without crashing.
+            // Corruption recovery: fall back to defaults without crashing or clobbering disk.
             cached = .default
             return .default
         }
@@ -104,20 +122,33 @@ public actor SettingsStore {
 
     public func save(_ settings: AppSettings) throws {
         try paths.ensureDirectories(fileManager: fileManager)
+
+        // Refuse to downgrade / rewrite a future schema file.
+        if let onDiskVersion = try? peekOnDiskSchemaVersion(),
+           onDiskVersion > AppSettings.currentSchemaVersion
+        {
+            throw SettingsStoreError.newerSchemaOnDisk(
+                onDisk: onDiskVersion,
+                supported: AppSettings.currentSchemaVersion
+            )
+        }
+
         var toSave = settings
+        // Writes from this binary always stamp the schema we understand.
+        // (Blocked above when disk already has a newer schema.)
         toSave.schemaVersion = AppSettings.currentSchemaVersion
         let data: Data
         do {
             data = try encoder.encode(toSave)
         } catch {
-            throw PersistenceError.encodingFailed
+            throw SettingsStoreError.encodingFailed
         }
         do {
             try data.write(to: paths.settingsFile, options: [.atomic])
             cached = toSave
             publish(toSave)
         } catch {
-            throw PersistenceError.ioFailed(error.localizedDescription)
+            throw SettingsStoreError.ioFailed(error.localizedDescription)
         }
     }
 
@@ -135,6 +166,19 @@ public actor SettingsStore {
             Task { await self.removeContinuation(id) }
         }
         return stream
+    }
+
+    /// Read schemaVersion from disk without mutating cache or rewriting the file.
+    private func peekOnDiskSchemaVersion() throws -> Int? {
+        let url = paths.settingsFile
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        let data = try Data(contentsOf: url)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        if let int = object["schemaVersion"] as? Int { return int }
+        if let num = object["schemaVersion"] as? NSNumber { return num.intValue }
+        return nil
     }
 
     private func publish(_ settings: AppSettings) {

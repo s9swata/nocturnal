@@ -10,8 +10,9 @@ struct HookForwarderMain {
     static func main() {
         let environment = ProcessInfo.processInfo.environment
         let args = Array(CommandLine.arguments.dropFirst())
+        let parsed = HookForwarderCLIOptions.parse(arguments: args)
 
-        if args.contains("--help") || args.contains("-h") {
+        if parsed.helpRequested {
             print(
                 """
                 nocturnal-hook-forwarder — fail-open stdin → Nocturnal socket
@@ -22,8 +23,8 @@ struct HookForwarderMain {
 
                 Options:
                   --socket PATH              Unix domain socket path
-                  --wrap-source SOURCE       Wrap non-envelope JSON as EventEnvelope (codex|claude)
-                  --session-id ID            Default session id when wrapping
+                  --wrap-source SOURCE       Default source when normalizing raw hooks (codex|claude)
+                  --session-id ID            Default session id when normalizing
                   --timeout SECONDS          Connect timeout (default 0.5)
                   --help                     Show help
 
@@ -31,15 +32,23 @@ struct HookForwarderMain {
                   NOCTURNAL_SOCKET           Override socket path
                   NOCTURNAL_FORWARDER_DEBUG  Set to 1 for stderr diagnostics
 
-                Always exits 0 (fail-open).
+                Always exits 0 (fail-open). Stdin is bounded (size + timeout).
+                Raw upstream JSON is normalized to EventEnvelope before send.
                 """
             )
             exit(0)
         }
 
+        let debug = environment["NOCTURNAL_FORWARDER_DEBUG"] == "1"
+        if debug {
+            for warning in parsed.warnings {
+                fputs("nocturnal-hook-forwarder: \(warning)\n", stderr)
+            }
+        }
+
         let socketURL: URL
-        if let idx = args.firstIndex(of: "--socket"), args.index(after: idx) < args.endIndex {
-            socketURL = URL(fileURLWithPath: args[args.index(after: idx)])
+        if let path = parsed.socketPath {
+            socketURL = URL(fileURLWithPath: path)
         } else if let env = environment[NocturnalEnvironmentKey.socket.rawValue], !env.isEmpty {
             socketURL = URL(fileURLWithPath: env)
         } else {
@@ -47,26 +56,17 @@ struct HookForwarderMain {
                 socketURL = try SocketPaths.resolve(environment: environment).socketURL
             } catch {
                 // Fail open even if path resolution fails.
-                if environment["NOCTURNAL_FORWARDER_DEBUG"] == "1" {
+                if debug {
                     fputs("nocturnal-hook-forwarder: path resolve failed: \(error)\n", stderr)
                 }
                 exit(0)
             }
         }
 
-        let wrapSource = parseWrapSource(from: args)
-        let sessionId = parseValue("--session-id", from: args)
-        let timeout: TimeInterval = {
-            if let raw = parseValue("--timeout", from: args), let value = TimeInterval(raw) {
-                return value
-            }
-            return 0.5
-        }()
-
         let options = HookForwarderOptions(
-            connectTimeout: timeout,
-            wrapSource: wrapSource,
-            defaultSessionId: sessionId
+            connectTimeout: parsed.timeout,
+            wrapSource: parsed.wrapSource,
+            defaultSessionId: parsed.sessionId
         )
         let forwarder = FailOpenHookForwarder(options: options)
         let lines = StdinReader.readLines()
@@ -77,31 +77,11 @@ struct HookForwarderMain {
 
         for line in lines {
             let result = forwarder.forward(line: line, socketPath: socketURL)
-            if !result.succeeded {
-                if environment["NOCTURNAL_FORWARDER_DEBUG"] == "1" {
-                    fputs("nocturnal-hook-forwarder: \(result.detail)\n", stderr)
-                }
+            if !result.succeeded, debug {
+                fputs("nocturnal-hook-forwarder: \(result.detail)\n", stderr)
             }
         }
 
         exit(0)
-    }
-
-    private static func parseWrapSource(from args: [String]) -> AgentSource? {
-        guard let raw = parseValue("--wrap-source", from: args) else { return nil }
-        switch raw.lowercased() {
-        case "codex": return .codex
-        case "claude": return .claude
-        default:
-            fputs("nocturnal-hook-forwarder: unknown wrap-source \(raw) (use codex|claude)\n", stderr)
-            return nil
-        }
-    }
-
-    private static func parseValue(_ flag: String, from args: [String]) -> String? {
-        guard let idx = args.firstIndex(of: flag), args.index(after: idx) < args.endIndex else {
-            return nil
-        }
-        return args[args.index(after: idx)]
     }
 }

@@ -2,7 +2,7 @@
 
 **Author:** nocturnal-core  
 **Date:** 2026-07-13  
-**Status:** Production MVP implemented; `swift build` clean.
+**Status:** Production MVP + confirmed robustness fixes; `swift test` green (126 tests).
 
 ---
 
@@ -10,16 +10,24 @@
 
 | Area | Status |
 |------|--------|
-| `EventSocketServer` / `EventSocketClient` | Multi-client NDJSON, cancel-safe stop, connect timeout, diagnostics, line size cap |
-| `SessionStore` | Cap/prune policy, hydrate + auto-persist, local response apply, unknown metrics |
-| Decoders | Codex + Claude implemented sets; `EnvelopeNormalizer` for raw stdin; unknown → raw metadata |
-| Persistence | Atomic JSON sessions/settings; corrupt quarantine; injectable `PersistencePaths` |
-| `HookInstaller` | Sidecar + optional native merge; dry-run; `configRoot` injectable |
-| `FailOpenHookForwarder` + CLI | Always exit 0; `--wrap-source`; connect timeout |
-| `ResponseTransport` | File + agent sidecars + in-memory + multiplex |
-| `JumpBackCoordinator` | Codex / Cursor / VS Code / Ghostty / iTerm2 / Terminal / Finder; AppleScript tab focus; fail-soft reasons |
-| CLIs | Setup install/uninstall/status + `--mode` + `--dry-run`; forwarder flags for simulation |
-| Settings | `AppSettings` schema v2 — no product `demoMode` (obsolete key ignored on decode) |
+| `EventSocketServer` / `EventSocketClient` | Multi-client NDJSON; **off-actor client reads**; cancel-safe stop (closes idle clients); `SO_NOSIGPIPE` |
+| `SessionStore` | Cap/prune; **stale events never rewind/revive terminal**; mismatched approval/question IDs are no-ops; `replaceAll` last-wins without trap |
+| Decoders | Codex + Claude implemented sets; metrics by **inferred** source; epoch timestamps via shared parser; incomplete envelope fast-path rejected |
+| Persistence | Atomic JSON; corrupt quarantine; **`deleteAll` removes all files** (not only decodable sessions); collision-free path encoding |
+| `ResponseTransport` | Envelope + **subdir sidecars** (`codex/`, `claude/`, `answer/`) — no flat namespace collision with `codex-x` |
+| `JumpBackCoordinator` | Codex schemes allowlisted (`codex`, `openai-codex`); AppleScript on **MainActor** |
+| Settings | Schema v2; **never downgrade/rewrite newer schema (e.g. 99)**; load is read-only |
+| Socket paths | `NOCTURNAL_APP_SUPPORT`; **explicit > env > default**; no eager App Support create when socket override set |
+
+---
+
+## Migration / compatibility notes (2026-07-13 robustness pass)
+
+1. **Session / response filenames** use `PathComponentEncoding` (percent-encode non-unreserved UTF-8). Reads fall back to legacy `/`+`:` → `_` sanitize. New writes use encoded names only. **Embedded `Session.id` is authoritative:** `load` / `save` legacy cleanup / `delete` never claim, migrate, or remove a legacy candidate whose decoded id differs from the request (e.g. shared `a_b.json` for `a/b` vs `a_b`). Matching legacy files migrate to the canonical path on successful `load`.
+2. **Response sidecars** moved from flat `codex-<id>.json` to `responses/codex/<encoded>.json` (same for `claude/`, `answer/`). Consumers must look in subdirs.
+3. **Settings:** loading a schemaVersion `> current` leaves the file untouched; `SettingsStore.save` throws `newerSchemaOnDisk`. Older schemas migrate in-memory only (no save-on-load).
+4. **Claude `permission_mode`:** only `ask` / `default` / `prompt` create approvals; `none` / `off` / `allow` / `bypassPermissions` / `acceptEdits` / etc. do not.
+5. **`sourceRaw`** is preserved across encode/decode hops when present.
 
 ---
 

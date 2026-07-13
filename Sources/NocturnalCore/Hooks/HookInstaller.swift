@@ -207,6 +207,7 @@ public struct HookInstaller: Sendable {
                     return result
                 }
             }
+            // Backup before overwriting any existing file (managed refresh, foreign, or invalid).
             if !dryRun {
                 backupPath = try backupExisting(url: url, product: product, label: "sidecar").path
             } else {
@@ -306,7 +307,7 @@ public struct HookInstaller: Sendable {
         }
     }
 
-    /// Codex `hooks.json`: object with `hooks` array of command strings, or a bare array.
+    /// Codex `hooks.json`: object with `hooks` array of command strings/objects, or a bare array.
     private func mergeCodexNative() throws -> MergeOutcome {
         let url = nativeConfigURL(for: .codex)
         let command = forwarderCommand()
@@ -317,50 +318,45 @@ public struct HookInstaller: Sendable {
         }
 
         var backupPath: String?
+        let managedEntry: [String: Any] = [
+            "command": command,
+            Self.managedKey: true,
+            "events": Array(CodexEventDecoder.implementedEventTypes).sorted(),
+        ]
         var root: [String: Any] = [
             Self.managedKey: true,
             "version": 1,
-            "hooks": [[
-                "command": command,
-                Self.managedKey: true,
-                "events": Array(CodexEventDecoder.implementedEventTypes).sorted(),
-            ]] as [[String: Any]],
+            "hooks": [managedEntry],
         ]
 
-        if fm.fileExists(atPath: url.path),
-           let data = try? Data(contentsOf: url),
-           let json = try? JSONSerialization.jsonObject(with: data)
-        {
+        if fm.fileExists(atPath: url.path) {
+            // Always backup existing native config before overwrite — including malformed JSON.
             if !dryRun {
                 backupPath = try backupExisting(url: url, product: .codex, label: "native").path
+            } else {
+                backupPath = "(dry-run backup)"
             }
-            if var obj = json as? [String: Any] {
-                var hooks = obj["hooks"] as? [[String: Any]] ?? []
-                hooks.removeAll { hook in
-                    (hook["command"] as? String)?.contains(Self.managedCommandMarker) == true
-                        || hook[Self.managedKey] as? Bool == true
+
+            if let data = try? Data(contentsOf: url),
+               let json = try? JSONSerialization.jsonObject(with: data)
+            {
+                if var obj = json as? [String: Any] {
+                    var hooks = codexHooksArray(from: obj["hooks"])
+                    hooks.removeAll { isManagedCodexHookEntry($0) }
+                    hooks.append(managedEntry)
+                    obj["hooks"] = hooks
+                    obj[Self.managedKey] = true
+                    root = obj
+                } else if let arr = json as? [Any] {
+                    var hooks = arr
+                    hooks.removeAll { isManagedCodexHookEntry($0) }
+                    hooks.append(managedEntry)
+                    // Prefer object shape going forward; preserve non-managed entries (incl. strings).
+                    root = [Self.managedKey: true, "hooks": hooks]
                 }
-                hooks.append([
-                    "command": command,
-                    Self.managedKey: true,
-                    "events": Array(CodexEventDecoder.implementedEventTypes).sorted(),
-                ])
-                obj["hooks"] = hooks
-                obj[Self.managedKey] = true
-                root = obj
-            } else if let arr = json as? [Any] {
-                var hooks = arr.compactMap { $0 as? [String: Any] }
-                hooks.removeAll { hook in
-                    (hook["command"] as? String)?.contains(Self.managedCommandMarker) == true
-                        || hook[Self.managedKey] as? Bool == true
-                }
-                hooks.append([
-                    "command": command,
-                    Self.managedKey: true,
-                ])
-                // Prefer object shape going forward.
-                root = [Self.managedKey: true, "hooks": hooks]
+                // else: unparseable shape after JSONSerialization — use fresh managed root
             }
+            // else: invalid JSON — backup already taken; write fresh managed root
         }
 
         if !dryRun {
@@ -391,23 +387,16 @@ public struct HookInstaller: Sendable {
         }
 
         if var obj = json as? [String: Any] {
-            if var hooks = obj["hooks"] as? [[String: Any]] {
-                hooks.removeAll { hook in
-                    (hook["command"] as? String)?.contains(Self.managedCommandMarker) == true
-                        || hook[Self.managedKey] as? Bool == true
-                }
-                obj["hooks"] = hooks
-            }
+            var hooks = codexHooksArray(from: obj["hooks"])
+            hooks.removeAll { isManagedCodexHookEntry($0) }
+            obj["hooks"] = hooks
             obj.removeValue(forKey: Self.managedKey)
             if !dryRun {
                 let out = try JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
                 try out.write(to: url, options: [.atomic])
             }
         } else if let arr = json as? [Any] {
-            let hooks = arr.compactMap { $0 as? [String: Any] }.filter { hook in
-                (hook["command"] as? String)?.contains(Self.managedCommandMarker) != true
-                    && hook[Self.managedKey] as? Bool != true
-            }
+            let hooks = arr.filter { !isManagedCodexHookEntry($0) }
             if !dryRun {
                 let out = try JSONSerialization.data(withJSONObject: hooks, options: [.prettyPrinted, .sortedKeys])
                 try out.write(to: url, options: [.atomic])
@@ -434,14 +423,20 @@ public struct HookInstaller: Sendable {
         var backupPath: String?
         var root: [String: Any] = [:]
 
-        if fm.fileExists(atPath: url.path),
-           let data = try? Data(contentsOf: url),
-           let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        {
+        if fm.fileExists(atPath: url.path) {
+            // Always backup before overwrite — including malformed JSON.
             if !dryRun {
                 backupPath = try backupExisting(url: url, product: .claude, label: "native").path
+            } else {
+                backupPath = "(dry-run backup)"
             }
-            root = obj
+
+            if let data = try? Data(contentsOf: url),
+               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            {
+                root = obj
+            }
+            // else: invalid JSON → write managed hooks into a fresh root after backup
         }
 
         var hooks = root["hooks"] as? [String: Any] ?? [:]
@@ -451,9 +446,7 @@ public struct HookInstaller: Sendable {
         ]
         for event in eventNames {
             var list = hooks[event] as? [[String: Any]] ?? []
-            list.removeAll { entry in
-                entryContainsForwarder(entry)
-            }
+            list.removeAll { entryContainsForwarder($0) }
             list.append([
                 Self.managedKey: true,
                 "hooks": [[
@@ -536,6 +529,32 @@ public struct HookInstaller: Sendable {
         return false
     }
 
+    /// Preserve string-format Codex hook entries when merging (do not drop them).
+    private func codexHooksArray(from value: Any?) -> [Any] {
+        guard let value else { return [] }
+        if let arr = value as? [Any] {
+            return arr
+        }
+        // Single string or object under "hooks" — wrap.
+        if value is String || value is [String: Any] {
+            return [value]
+        }
+        return []
+    }
+
+    private func isManagedCodexHookEntry(_ entry: Any) -> Bool {
+        if let command = entry as? String {
+            return command.contains(Self.managedCommandMarker)
+        }
+        if let hook = entry as? [String: Any] {
+            if hook[Self.managedKey] as? Bool == true { return true }
+            if let command = hook["command"] as? String, command.contains(Self.managedCommandMarker) {
+                return true
+            }
+        }
+        return false
+    }
+
     // MARK: - Shared
 
     private func backupExisting(url: URL, product: HookProduct, label: String) throws -> URL {
@@ -550,8 +569,16 @@ public struct HookInstaller: Sendable {
         return dest
     }
 
+    /// POSIX single-quote shell escaping for paths that may contain spaces
+    /// (e.g. default Application Support).
+    public static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     public func forwarderCommand() -> String {
-        "NOCTURNAL_SOCKET=\(socketPath.path) \(forwarderBinaryPath.path)"
+        let socket = Self.shellQuote(socketPath.path)
+        let binary = Self.shellQuote(forwarderBinaryPath.path)
+        return "NOCTURNAL_SOCKET=\(socket) \(binary)"
     }
 
     /// Minimal hook command config pointing at the forwarder.
@@ -562,14 +589,20 @@ public struct HookInstaller: Sendable {
         let escaped = command
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+        let forwarderEscaped = forwarderBinaryPath.path
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let socketEscaped = socketPath.path
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
 
         return """
         {
           "\(Self.managedKey)": true,
           "product": "\(product.rawValue)",
           "version": 1,
-          "forwarder": "\(forwarderBinaryPath.path)",
-          "socket": "\(socketPath.path)",
+          "forwarder": "\(forwarderEscaped)",
+          "socket": "\(socketEscaped)",
           "command": "\(escaped)",
           "events": \(implementedEventsJSON(for: product)),
           "notes": "Nocturnal-managed sidecar. Use --mode merge-native to also patch product configs."

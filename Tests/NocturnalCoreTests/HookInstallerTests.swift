@@ -117,4 +117,140 @@ struct HookInstallerTests {
         #expect(body.contains(HookInstaller.managedKey) || body.contains("nocturnalManaged"))
         #expect(body.contains("nocturnal-hook-forwarder"))
     }
+
+    @Test func shellQuoteWrapsSpacesAndEscapesSingleQuotes() {
+        #expect(HookInstaller.shellQuote("/tmp/simple") == "'/tmp/simple'")
+        let spaced = "/Users/me/Library/Application Support/Nocturnal/ipc.sock"
+        #expect(HookInstaller.shellQuote(spaced) == "'\(spaced)'")
+        #expect(HookInstaller.shellQuote("it's") == "'it'\\''s'")
+    }
+
+    @Test func forwarderCommandQuotesSpacedPaths() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-hooks-space")
+        defer { cleanup() }
+
+        let appSupport = temp.appendingPathComponent("Application Support/Nocturnal", isDirectory: true)
+        let binary = temp.appendingPathComponent("Helpers/nocturnal-hook-forwarder")
+        let socket = appSupport.appendingPathComponent("ipc.sock")
+        let installer = HookInstaller(
+            configRoot: temp,
+            forwarderBinaryPath: binary,
+            socketPath: socket,
+            backupsDirectory: temp.appendingPathComponent("backups", isDirectory: true)
+        )
+
+        let command = installer.forwarderCommand()
+        #expect(command.contains("NOCTURNAL_SOCKET='"))
+        #expect(command.contains("Application Support"))
+        #expect(command.contains("'\(binary.path)'") || command.contains(HookInstaller.shellQuote(binary.path)))
+        // Unquoted space would break shell tokenization of Application Support.
+        #expect(command.contains("SOCKET=/Users") == false)
+
+        _ = try installer.install(product: .codex)
+        let body = try String(contentsOf: installer.configURL(for: .codex), encoding: .utf8)
+        #expect(body.contains("Application Support"))
+        #expect(body.contains("NOCTURNAL_SOCKET="))
+    }
+
+    @Test func mergeNativeBacksUpMalformedCodexHooksJSON() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-hooks-malformed")
+        defer { cleanup() }
+
+        let backups = temp.appendingPathComponent("backups", isDirectory: true)
+        let installer = HookInstaller(
+            configRoot: temp,
+            forwarderBinaryPath: URL(fileURLWithPath: "/tmp/nocturnal-hook-forwarder"),
+            socketPath: URL(fileURLWithPath: "/tmp/n.sock"),
+            backupsDirectory: backups,
+            mode: .mergeNative
+        )
+
+        let native = installer.nativeConfigURL(for: .codex)
+        try FileManager.default.createDirectory(at: native.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "this is not json {{{".write(to: native, atomically: true, encoding: .utf8)
+
+        let result = try installer.install(product: .codex)
+        #expect(result.succeeded)
+        #expect(result.backupPath != nil)
+
+        let backup = try #require(result.backupPath)
+        #expect(FileManager.default.fileExists(atPath: backup))
+        let backupBody = try String(contentsOfFile: backup, encoding: .utf8)
+        #expect(backupBody.contains("this is not json"))
+
+        let rewritten = try String(contentsOf: native, encoding: .utf8)
+        #expect(rewritten.contains(HookInstaller.managedCommandMarker))
+        #expect(rewritten.contains(HookInstaller.managedKey))
+    }
+
+    @Test func mergeNativePreservesStringFormatCodexHooks() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-hooks-strings")
+        defer { cleanup() }
+
+        let backups = temp.appendingPathComponent("backups", isDirectory: true)
+        let installer = HookInstaller(
+            configRoot: temp,
+            forwarderBinaryPath: URL(fileURLWithPath: "/opt/bin/nocturnal-hook-forwarder"),
+            socketPath: URL(fileURLWithPath: "/tmp/sock"),
+            backupsDirectory: backups,
+            mode: .mergeNative
+        )
+
+        let native = installer.nativeConfigURL(for: .codex)
+        try FileManager.default.createDirectory(at: native.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let existing: [String: Any] = [
+            "hooks": [
+                "echo user-hook",
+                ["command": "other-tool --flag", "events": ["session.started"]],
+            ] as [Any],
+        ]
+        let existingData = try JSONSerialization.data(withJSONObject: existing, options: [.prettyPrinted])
+        try existingData.write(to: native)
+
+        let result = try installer.install(product: .codex)
+        #expect(result.succeeded)
+        #expect(result.backupPath != nil)
+
+        let data = try Data(contentsOf: native)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let hooks = try #require(json["hooks"] as? [Any])
+
+        let stringHooks = hooks.compactMap { $0 as? String }
+        #expect(stringHooks.contains("echo user-hook"))
+
+        let objectCommands = hooks.compactMap { entry -> String? in
+            (entry as? [String: Any])?["command"] as? String
+        }
+        #expect(objectCommands.contains("other-tool --flag"))
+        #expect(objectCommands.contains { $0.contains(HookInstaller.managedCommandMarker) })
+        // User string entry must not have been dropped by object-only merge.
+        #expect(hooks.count >= 3)
+    }
+
+    @Test func mergeNativeBacksUpInvalidSidecarBeforeOverwrite() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-hooks-bad-sidecar")
+        defer { cleanup() }
+
+        let backups = temp.appendingPathComponent("backups", isDirectory: true)
+        let installer = HookInstaller(
+            configRoot: temp,
+            forwarderBinaryPath: URL(fileURLWithPath: "/tmp/fwd"),
+            socketPath: URL(fileURLWithPath: "/tmp/s.sock"),
+            backupsDirectory: backups
+        )
+
+        let sidecar = installer.configURL(for: .claude)
+        try FileManager.default.createDirectory(at: sidecar.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "{not-valid-json".write(to: sidecar, atomically: true, encoding: .utf8)
+
+        let result = try installer.install(product: .claude)
+        #expect(result.succeeded)
+        let backup = try #require(result.backupPath)
+        #expect(FileManager.default.fileExists(atPath: backup))
+        let backupBody = try String(contentsOfFile: backup, encoding: .utf8)
+        #expect(backupBody.contains("{not-valid-json"))
+
+        let body = try String(contentsOf: sidecar, encoding: .utf8)
+        #expect(body.contains(HookInstaller.managedKey))
+    }
 }

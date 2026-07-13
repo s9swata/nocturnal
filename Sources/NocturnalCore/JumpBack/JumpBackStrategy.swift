@@ -88,18 +88,26 @@ public struct CodexDeepLinkStrategy: JumpBackStrategy {
     public let id = "codex-deeplink"
     public let displayName = "Codex Deep Link"
     public let priority = 100
-    /// Documented production scheme candidates; prefer whatever the event supplied.
+    /// Documented production scheme candidates. Only these schemes are opened.
     public static let knownSchemes = ["codex", "openai-codex"]
 
     public init() {}
 
     public func canHandle(_ context: JumpBackContext) -> Bool {
-        context.codexDeepLink != nil
+        guard let url = context.codexDeepLink else { return false }
+        return Self.isAllowedScheme(url.scheme)
     }
 
     public func perform(_ context: JumpBackContext) async -> JumpBackResult {
         guard let url = context.codexDeepLink else {
             return JumpBackResult(strategyID: id, succeeded: false, detail: "Missing deep link")
+        }
+        guard Self.isAllowedScheme(url.scheme) else {
+            return JumpBackResult(
+                strategyID: id,
+                succeeded: false,
+                detail: "Unsupported deep-link scheme '\(url.scheme ?? "")' (allowed: \(Self.knownSchemes.joined(separator: ", ")))"
+            )
         }
         let ok = await MainActor.run {
             NSWorkspace.shared.open(url)
@@ -109,6 +117,12 @@ public struct CodexDeepLinkStrategy: JumpBackStrategy {
             succeeded: ok,
             detail: ok ? "Opened \(url.absoluteString)" : "NSWorkspace.open failed for \(url.absoluteString)"
         )
+    }
+
+    public static func isAllowedScheme(_ scheme: String?) -> Bool {
+        guard let scheme, !scheme.isEmpty else { return false }
+        let lowered = scheme.lowercased()
+        return knownSchemes.contains { $0.lowercased() == lowered }
     }
 }
 
@@ -381,17 +395,22 @@ private func escapeAppleScript(_ value: String) -> String {
         .replacingOccurrences(of: "\"", with: "\\\"")
 }
 
+/// Run AppleScript on the main actor. `NSAppleScript` is AppKit-bound and must
+/// not run inside `Task.detached` (not Sendable; undefined thread affinity).
+@MainActor
+private func runAppleScriptOnMainActor(_ source: String) -> JumpBackResult {
+    let script = NSAppleScript(source: source)
+    var error: NSDictionary?
+    _ = script?.executeAndReturnError(&error)
+    if let error {
+        let message = error[NSAppleScript.errorMessage] as? String ?? String(describing: error)
+        return JumpBackResult(strategyID: "applescript", succeeded: false, detail: message)
+    }
+    return JumpBackResult(strategyID: "applescript", succeeded: true, detail: "ok")
+}
+
 private func runAppleScript(_ source: String) async -> JumpBackResult {
-    await Task.detached(priority: .userInitiated) {
-        // Documented reason for detached: NSAppleScript is synchronous and not
-        // Sendable; isolate away from actors without blocking UI if caller is MainActor.
-        let script = NSAppleScript(source: source)
-        var error: NSDictionary?
-        _ = script?.executeAndReturnError(&error)
-        if let error {
-            let message = error[NSAppleScript.errorMessage] as? String ?? String(describing: error)
-            return JumpBackResult(strategyID: "applescript", succeeded: false, detail: message)
-        }
-        return JumpBackResult(strategyID: "applescript", succeeded: true, detail: "ok")
-    }.value
+    await MainActor.run {
+        runAppleScriptOnMainActor(source)
+    }
 }

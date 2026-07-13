@@ -142,4 +142,93 @@ struct SocketBridgeTests {
 
         await server.stop()
     }
+
+    /// Idle first client must not block a second client from delivering, and
+    /// `stop()` must complete promptly while a client is connected idle.
+    @Test func secondClientDeliversWhileFirstIsIdleAndStopIsResponsive() async throws {
+        let (temp, cleanup) = try TestSupport.makeShortSocketRoot(prefix: "ni")
+        defer { cleanup() }
+
+        let socketURL = SocketPaths.testingSocketPath(in: temp, name: "i2.sock")
+        let server = EventSocketServer(path: socketURL)
+        let stream = try await server.start()
+        try await Task.sleep(for: .milliseconds(50))
+
+        // Hold an idle connection open (no data) while another client sends.
+        let pathString = socketURL.path
+        let idleHold = Task.detached {
+            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+            guard fd >= 0 else { return }
+            defer { Darwin.close(fd) }
+            var addr = sockaddr_un()
+            addr.sun_family = sa_family_t(AF_UNIX)
+            pathString.withCString { src in
+                withUnsafeMutablePointer(to: &addr.sun_path) { dst in
+                    _ = strcpy(UnsafeMutableRawPointer(dst).assumingMemoryBound(to: CChar.self), src)
+                }
+            }
+            _ = withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                    Darwin.connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            }
+            try? await Task.sleep(for: .seconds(2))
+        }
+
+        try await Task.sleep(for: .milliseconds(80))
+
+        let envelope = EventEnvelope(
+            source: .claude,
+            eventType: "SessionStart",
+            sessionId: "second-client",
+            payload: ["title": .string("from-second")]
+        )
+        let client = EventSocketClient(path: socketURL, connectTimeout: 2.0)
+        try client.send(envelope)
+
+        // Collect with a timeout via next() pattern — no shared mutable state races.
+        let received: EventEnvelope? = await withTaskGroup(of: EventEnvelope?.self) { group in
+            group.addTask {
+                for await event in stream {
+                    return event
+                }
+                return nil
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(2))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first ?? nil
+        }
+        #expect(received?.sessionId == "second-client")
+
+        let stopStarted = ContinuousClock.now
+        await server.stop()
+        let stopElapsed = ContinuousClock.now - stopStarted
+        #expect(stopElapsed < .seconds(2))
+
+        idleHold.cancel()
+    }
+}
+
+// MARK: - Jump-back scheme validation
+
+struct JumpBackStrategyTests {
+    @Test func codexDeepLinkRejectsUnknownSchemes() async {
+        let strategy = CodexDeepLinkStrategy()
+        let bad = JumpBackContext(codexDeepLink: URL(string: "https://evil.example/x"))
+        #expect(strategy.canHandle(bad) == false)
+        let result = await strategy.perform(bad)
+        #expect(result.succeeded == false)
+        #expect(result.detail.lowercased().contains("scheme") || result.detail.contains("Unsupported"))
+
+        let good = JumpBackContext(codexDeepLink: URL(string: "codex://session/1"))
+        #expect(strategy.canHandle(good))
+        #expect(CodexDeepLinkStrategy.isAllowedScheme("codex"))
+        #expect(CodexDeepLinkStrategy.isAllowedScheme("openai-codex"))
+        #expect(CodexDeepLinkStrategy.isAllowedScheme("CODEX"))
+        #expect(CodexDeepLinkStrategy.isAllowedScheme("javascript") == false)
+    }
 }

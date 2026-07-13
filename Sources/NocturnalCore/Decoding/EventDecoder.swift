@@ -57,7 +57,13 @@ public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
                 }
             }
         }
-        record(result, source: envelope.source)
+        // Attribute metrics to the resolved/inferred source, not only the wire label.
+        let metricSource: AgentSource = {
+            if result.inferredSource != .unknown { return result.inferredSource }
+            if envelope.source != .unknown { return envelope.source }
+            return .unknown
+        }()
+        record(result, source: metricSource)
         return result
     }
 
@@ -136,9 +142,10 @@ public enum EventDecodeHelpers {
 
 /// Wraps non-envelope JSON (Claude/Codex raw hook stdin) into ``EventEnvelope``.
 ///
-/// When input already looks like an envelope (`eventType`/`sessionId` present), it
-/// is decoded as-is. Otherwise fields are inferred best-effort and the full object
-/// is preserved under `raw`.
+/// When input already looks like a **complete** envelope (`eventType` + `sessionId`
+/// present with real values), it is decoded as-is. Incomplete shapes such as
+/// sessionId-only objects are **rejected** from the fast path so upstream fields
+/// are normalized through the full object path.
 public struct EnvelopeNormalizer: Sendable {
     public var defaultSource: AgentSource
     public var defaultSessionId: String?
@@ -153,15 +160,11 @@ public struct EnvelopeNormalizer: Sendable {
         let trimmed = line.trimmingCRLFPublic
         guard !trimmed.isEmpty else { return nil }
 
-        // Fast path: already an EventEnvelope.
+        // Fast path: already a complete EventEnvelope (not sessionId-only stubs).
         if let envelope = try? makeDecoder().decode(EventEnvelope.self, from: trimmed),
-           !envelope.eventType.isEmpty,
-           envelope.eventType != "unknown" || envelope.sessionId != "unknown"
+           Self.isCompleteEnvelope(envelope)
         {
-            // If decode succeeded with real fields, use it.
-            if envelope.sessionId != "unknown" || envelope.payload.isEmpty == false || !envelope.raw.isEmpty {
-                return envelope
-            }
+            return envelope
         }
 
         let root: JSONValue
@@ -175,18 +178,39 @@ public struct EnvelopeNormalizer: Sendable {
                 sessionId: defaultSessionId ?? "unknown",
                 payload: ["text": .string(String(data: trimmed, encoding: .utf8) ?? "")],
                 raw: ["parseError": .string(String(describing: error))],
-                sourceRaw: defaultSource == .unknown ? nil : nil
+                sourceRaw: nil
             )
         }
 
         let object = root.asObject
 
-        // Detect envelope-shaped objects that failed UUID/date decode.
-        if object["eventType"] != nil || object["event_type"] != nil {
-            return envelopeFromPartial(object, original: root)
+        // Detect envelope-shaped objects that failed UUID/date decode or failed the
+        // completeness check (e.g. sessionId-only stubs).
+        if object["eventType"] != nil || object["event_type"] != nil
+            || object["sessionId"] != nil || object["session_id"] != nil
+        {
+            // Prefer partial envelope reconstruction when event type keys exist;
+            // sessionId-only still goes through upstream hook normalization so
+            // raw fields (cwd, hook_event_name, …) land in payload.
+            if object["eventType"] != nil || object["event_type"] != nil {
+                return envelopeFromPartial(object, original: root)
+            }
+            return envelopeFromUpstreamHook(object, original: root)
         }
 
         return envelopeFromUpstreamHook(object, original: root)
+    }
+
+    /// A fast-path envelope must carry a real event type (not the decode default
+    /// `"unknown"`) and a real session id. SessionId-only stubs are incomplete.
+    public static func isCompleteEnvelope(_ envelope: EventEnvelope) -> Bool {
+        guard !envelope.eventType.isEmpty, envelope.eventType != "unknown" else {
+            return false
+        }
+        guard !envelope.sessionId.isEmpty, envelope.sessionId != "unknown" else {
+            return false
+        }
+        return true
     }
 
     private func envelopeFromPartial(_ object: [String: JSONValue], original: JSONValue) -> EventEnvelope {
@@ -194,23 +218,43 @@ public struct EnvelopeNormalizer: Sendable {
         let sessionId = EventDecodeHelpers.string(object, "sessionId", "session_id")
             ?? defaultSessionId
             ?? "unknown"
-        let sourceRaw = EventDecodeHelpers.string(object, "source")
-        let source = sourceRaw.map { AgentSource(parsing: $0) } ?? defaultSource
-        let payload = object["payload"]?.objectValue ?? object
+        let sourceRaw = EventDecodeHelpers.string(object, "sourceRaw")
+            ?? EventDecodeHelpers.string(object, "source")
+        let source: AgentSource = {
+            if let raw = EventDecodeHelpers.string(object, "source") {
+                return AgentSource(parsing: raw)
+            }
+            return defaultSource
+        }()
+        let payload = object["payload"]?.objectValue ?? [:]
+        // When payload key is absent, keep structured fields out of a fake payload
+        // only if this is a true envelope shape; otherwise use full object.
+        let resolvedPayload: [String: JSONValue] = {
+            if object["payload"] != nil {
+                return payload
+            }
+            // Envelope-like without payload key: remaining keys become payload-ish raw.
+            return object
+        }()
         let raw = object["raw"]?.objectValue ?? original.asObject
         let timestamp = parseTimestamp(object["timestamp"]) ?? Date()
         let id = parseUUID(object["id"]) ?? UUID()
+        let schema: Int = {
+            if let exact = object["v"]?.exactIntValue { return exact }
+            if let n = object["v"]?.numberValue { return Int(n) }
+            return EventEnvelope.currentSchemaVersion
+        }()
 
         return EventEnvelope(
             id: id,
-            schemaVersion: Int(object["v"]?.numberValue ?? Double(EventEnvelope.currentSchemaVersion)),
+            schemaVersion: schema,
             source: source,
             eventType: eventType,
             sessionId: sessionId,
             timestamp: timestamp,
-            payload: payload,
+            payload: resolvedPayload,
             raw: raw,
-            sourceRaw: source == .unknown ? sourceRaw : nil
+            sourceRaw: source == .unknown ? sourceRaw : (object["sourceRaw"] != nil ? sourceRaw : nil)
         )
     }
 
@@ -249,6 +293,9 @@ public struct EnvelopeNormalizer: Sendable {
             return .unknown
         }()
 
+        let sourceRaw = EventDecodeHelpers.string(object, "sourceRaw")
+            ?? EventDecodeHelpers.string(object, "source")
+
         return EventEnvelope(
             source: inferredSource,
             eventType: eventType,
@@ -258,21 +305,23 @@ public struct EnvelopeNormalizer: Sendable {
                 ?? Date(),
             payload: object,
             raw: original.asObject,
-            sourceRaw: inferredSource == .unknown ? EventDecodeHelpers.string(object, "source") : nil
+            sourceRaw: inferredSource == .unknown ? sourceRaw : nil
         )
     }
 
     private func parseTimestamp(_ value: JSONValue?) -> Date? {
         guard let value else { return nil }
         if case .number(let n) = value {
-            // Heuristic: ms vs s
-            if n > 1_000_000_000_000 {
-                return Date(timeIntervalSince1970: n / 1000)
-            }
-            return Date(timeIntervalSince1970: n)
+            return EventEnvelopeDateParsing.parseEpoch(n)
         }
         if let s = value.stringValue {
-            return EventEnvelopeDateParsing.parse(s)
+            // Prefer ISO parse; numeric strings go through epoch when finite.
+            if let date = EventEnvelopeDateParsing.parse(s) {
+                return date
+            }
+            if let n = Double(s) {
+                return EventEnvelopeDateParsing.parseEpoch(n)
+            }
         }
         return nil
     }
@@ -284,7 +333,10 @@ public struct EnvelopeNormalizer: Sendable {
 
     private func makeDecoder() -> JSONDecoder {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        // Shared date parser: ISO-8601 **and** numeric epoch timestamps.
+        decoder.dateDecodingStrategy = .custom { decoder in
+            try EventEnvelopeDateParsing.decode(from: decoder)
+        }
         return decoder
     }
 }

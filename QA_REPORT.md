@@ -1,8 +1,8 @@
 # QA_REPORT — Nocturnal
 
-**Author:** nocturnal-qa (follow-up cleanup)  
-**Date:** 2026-07-13  
-**Host:** macOS, Command Line Tools only (no full Xcode)  
+**Author:** nocturnal-qa / CLI-hook owner (CLI + hook installer fixes)
+**Date:** 2026-07-13
+**Host:** macOS, Command Line Tools only (no full Xcode)
 **Swift:** Apple Swift 6.2.x (`swift build` / `swift test` under CLT)
 
 ---
@@ -11,11 +11,18 @@
 
 | Gate | Result |
 |------|--------|
-| `swift build` | **PASS** |
-| `swift test` | **PASS** — **50 tests**, 8 suites |
-| `Scripts/package_app.sh` | **PASS** → `build/Nocturnal.app` |
-| `file` + `codesign -dv` | **PASS** (adhoc arm64) |
+| `swift build` | **PASS** (shared tree) |
+| Focused CLI/hook tests | **PASS** — `CLIParsingTests` + `HookForwarderTests` + `HookInstallerTests` |
+| `swift test` (full) | **PASS** — **132 tests in 13 suites** (including `ResponseRoutingTests`) |
 | Real `~/.codex` / `~/.claude` writes in tests | **None** |
+
+### CLI / hook fixes (this pass)
+
+1. **Flag parsing** — value-required flags reject following flags / missing values (`CLIArgumentParser`).
+2. **setup** — missing `--product` / `--forwarder` values → usage errors (exit 2); omit flag still defaults/auto-discovers.
+3. **Forwarder** — always normalize raw stdin → `EventEnvelope`; bounded timeout-aware stdin read.
+4. **HookInstaller** — backup malformed native/sidecar before overwrite; preserve string Codex hooks; shell-quote paths with spaces.
+5. **package_app.sh** — architecture-safe framework packaging; zero frameworks OK; multi-arch lipo + hard fail on partial arch coverage.
 
 ### Follow-up items resolved (this pass)
 
@@ -37,21 +44,27 @@ Fixtures load from repo-root `Fixtures/` via `#filePath` walk (`TestSupport`).
 
 ## Test results (exact)
 
+Final verified full run (exit **0**):
+
 ```text
 $ swift test
 …
-✔ Suite EventDecodingTests passed …
-✔ Suite SessionStateTests passed …
-✔ Suite SessionStoreTests passed …
-✔ Suite ResponseRoutingTests passed …
-✔ Suite HookInstallerTests passed …
 ✔ Suite JSONValueTests passed …
+✔ Suite ResponseRoutingTests passed …
+✔ Suite JumpBackStrategyTests passed …
+✔ Suite EventDecodingTests passed …
+✔ Suite SetupCommandFormattingTests passed …
+✔ Suite SessionStoreTests passed …
+✔ Suite OverlayGeometryTests passed …
+✔ Suite HookInstallerTests passed …
 ✔ Suite PersistenceTests passed …
+✔ Suite HookForwarderTests passed …
 ✔ Suite SocketBridgeTests passed …
-✔ Test run with 50 tests in 8 suites passed after 0.248 seconds.
+… (CLIParsingTests, SessionStateTests, and remaining suites also green)
+✔ Test run with 132 tests in 13 suites passed after 0.393 seconds.
 ```
 
-Exit code **0**.
+Earlier concurrent snapshots that reported **Partial** full runs or **50 tests in 8 suites** reflected mid-implementation tree state while core/CLI suites were still landing; they are **not** the final verified result. `ResponseRoutingTests` (subdir sidecar layout under `responses/{codex,claude,answer}/`) is **green** in the final run.
 
 ### New / updated coverage (this pass)
 
@@ -63,6 +76,12 @@ Exit code **0**.
 | Replay includes question | `SessionStoreTests/replaySimulationAppliesEnvelopes` |
 | HookInstaller uses Core socket | `HookInstallerTests/resolveHonorsConfigRootEnvironment` |
 | Obsolete settings key | `PersistenceTests/settingsDecodeToleratesObsoleteDemoModeKey` |
+| CLI flag parsing | `CLIParsingTests` |
+| Forwarder envelope normalize / stdin bounds | `HookForwarderTests` |
+| Setup usage formatting | `SetupCommandFormattingTests` |
+| Response routing subdir sidecars | `ResponseRoutingTests` (paths + multiplex + e2e) |
+| Overlay geometry contracts | `OverlayGeometryTests` |
+| Jump-back strategies | `JumpBackStrategyTests` |
 
 Short-path safeguards preserved: `SocketPaths.makeShortTestingRoot`, `SocketPaths.testingSocketPath`, `TestSupport.makeShortSocketRoot` under `/tmp`.
 
@@ -81,18 +100,30 @@ Short-path safeguards preserved: `SocketPaths.makeShortTestingRoot`, `SocketPath
 | Persistence corruption | quarantine + skip | Pass |
 | Socket path resolution | env override + default + testing helper | Pass |
 | Hook installation temp-only | `HookInstallerTests` | Pass |
-| Response routing | file sidecars, multiplex, e2e | Pass |
-| Fail-open forwarder | `JSONValueTests` + socket forwarder test | Pass |
+| Response routing | `ResponseRoutingTests` — subdir sidecars (`responses/{codex,claude,answer}/`), multiplex, e2e | Pass |
+| Fail-open forwarder | `JSONValueTests` + `HookForwarderTests` + socket forwarder test | Pass |
+| CLI flag parsing | `CLIParsingTests` (value-required flags, setup usage errors) | Pass |
+| Stdin bounded read | `HookForwarderTests` pipe/maxBytes/timeout | Pass |
+| Envelope normalize on raw path | `HookForwarderTests` Claude/Codex raw JSON | Pass |
+| Hook install: backup / string hooks / spaced paths | `HookInstallerTests` | Pass |
+| Overlay geometry contracts | `OverlayGeometryTests` | Pass |
+| Jump-back strategies | `JumpBackStrategyTests` | Pass |
+| Setup command formatting | `SetupCommandFormattingTests` | Pass |
 
 ### Gaps (not automated)
 
 | Gap | Notes |
 |-----|--------|
 | SwiftUI / AppKit UI | No UI test runner under CLT; manual per `UI_HANDOFF` / fixtures |
-| Jump-back strategies | Needs mock openers / NSWorkspace |
+| Jump-back live openers | Unit coverage via `JumpBackStrategyTests`; live NSWorkspace open remains manual |
 | Native merge golden files | Vendor shapes still evolving |
 | Packaged app launch UI | Not automated; binary + codesign verified |
 | Forwarder process exit code | Manual in `docs/simulation.md` (library path covered) |
+| Framework lipo multi-arch | No frameworks shipped; `package_app.sh` fails clearly if arch set is incomplete |
+
+### Historical note (resolved)
+
+During concurrent core work, full `swift test` briefly looked **Partial** because `ResponseRoutingTests` still expected flat sidecar filenames while Core moved to `responses/{codex,claude,answer}/`. That mismatch is **closed**: routing implementation and tests agree; suite is green in the final 132/13 run.
 
 ---
 
@@ -154,6 +185,7 @@ Helpers are adhoc-signed as well.
 |------|---------|
 | [`docs/reviews/qa-on-core.md`](docs/reviews/qa-on-core.md) | Core — socket single-source **resolved** |
 | [`docs/reviews/qa-on-ui.md`](docs/reviews/qa-on-ui.md) | UI — copy + dual-resolution **resolved** |
+| [`docs/reviews/2026-07-13_ui_vercel-refresh.md`](docs/reviews/2026-07-13_ui_vercel-refresh.md) | UI monochrome refresh + overlay geometry — **Approve with nits** |
 
 ---
 
@@ -188,9 +220,10 @@ export NOCTURNAL_CONFIG_ROOT=/tmp/nocturnal-setup-test
 
 ## Done criteria
 
-1. Automated tests run and pass (`swift test`) — **yes (50)**
+1. Automated tests run and pass (`swift test`) — **yes (132 tests / 13 suites)**
 2. Package script produces `build/Nocturnal.app` — **yes**
 3. `file` + `codesign` verification recorded — **yes**
 4. Bounded follow-ups (socket SSoT, fixtures, UI copy, gitignore, placeholder) — **yes**
-5. `QA_REPORT.md` complete — **yes**
-6. No commit performed — **yes**
+5. Response routing subdir paths + tests green — **yes**
+6. `QA_REPORT.md` complete — **yes**
+7. No commit performed — **yes**

@@ -26,10 +26,13 @@ struct ResponseRoutingTests {
         #expect(roundTripped.approved)
         #expect(roundTripped.note == "ok")
 
-        let codexSide = paths.responsesDirectory.appendingPathComponent("codex-req-approve-1.json")
-        let claudeSide = paths.responsesDirectory.appendingPathComponent("claude-req-approve-1.json")
+        let codexSide = paths.responseSidecarFile(agent: "codex", requestId: "req-approve-1")
+        let claudeSide = paths.responseSidecarFile(agent: "claude", requestId: "req-approve-1")
         #expect(FileManager.default.fileExists(atPath: codexSide.path))
         #expect(FileManager.default.fileExists(atPath: claudeSide.path))
+        // Sidecars live under subdirs — never flat next to envelopes.
+        #expect(codexSide.path.contains("/codex/"))
+        #expect(claudeSide.path.contains("/claude/"))
 
         let codexData = try Data(contentsOf: codexSide)
         let codexJSON = try JSONSerialization.jsonObject(with: codexData) as? [String: Any]
@@ -62,8 +65,71 @@ struct ResponseRoutingTests {
         #expect(roundTripped.text == "use main")
         #expect(roundTripped.promptId == "prompt-9")
 
-        let side = paths.responsesDirectory.appendingPathComponent("answer-prompt-9.json")
+        let side = paths.responseSidecarFile(agent: "answer", requestId: "prompt-9")
         #expect(FileManager.default.fileExists(atPath: side.path))
+        #expect(side.path.contains("/answer/"))
+    }
+
+    /// Envelope id `codex-x` and Codex sidecar for id `x` must never share a path.
+    @Test func envelopeAndSidecarNamespacesDoNotCollide() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-resp-ns")
+        defer { cleanup() }
+
+        let paths = try TestSupport.makePaths(in: temp)
+        let transport = FileResponseTransport(paths: paths, writeAgentSidecars: true)
+
+        // Sidecar for request "x" → responses/codex/<encoded x>.json
+        try await transport.submit(.approval(ApprovalDecision(
+            requestId: "x",
+            sessionId: SessionID("s"),
+            approved: true
+        )))
+
+        // Envelope for request "codex-x" → responses/<encoded codex-x>.json
+        try await transport.submit(.approval(ApprovalDecision(
+            requestId: "codex-x",
+            sessionId: SessionID("s"),
+            approved: false
+        )))
+
+        let envelopeX = paths.responseFile(for: "x")
+        let envelopeCodexX = paths.responseFile(for: "codex-x")
+        let sidecarX = paths.responseSidecarFile(agent: "codex", requestId: "x")
+        let sidecarCodexX = paths.responseSidecarFile(agent: "codex", requestId: "codex-x")
+
+        // All four paths must be distinct.
+        let all = [envelopeX.path, envelopeCodexX.path, sidecarX.path, sidecarCodexX.path]
+        #expect(Set(all).count == 4)
+
+        // Older flat layout would have collided: codex-x.json for both.
+        let legacyFlatCollision = paths.responsesDirectory
+            .appendingPathComponent("codex-x.json").path
+        #expect(sidecarX.path != legacyFlatCollision || envelopeCodexX.path != legacyFlatCollision)
+        #expect(sidecarX.path != envelopeCodexX.path)
+
+        let loadedX = try transport.load(requestId: "x")
+        let loadedCodexX = try transport.load(requestId: "codex-x")
+        guard case .approval(let dx)? = loadedX else {
+            Issue.record("expected approval for x")
+            return
+        }
+        guard case .approval(let dcx)? = loadedCodexX else {
+            Issue.record("expected approval for codex-x")
+            return
+        }
+        #expect(dx.approved == true)
+        #expect(dcx.approved == false)
+
+        // Sidecar contents must match their own request ids (no overwrite).
+        let sideData = try Data(contentsOf: sidecarX)
+        let sideJSON = try JSONSerialization.jsonObject(with: sideData) as? [String: Any]
+        #expect(sideJSON?["request_id"] as? String == "x")
+        #expect(sideJSON?["approved"] as? Bool == true)
+
+        let sideCodexXData = try Data(contentsOf: sidecarCodexX)
+        let sideCodexXJSON = try JSONSerialization.jsonObject(with: sideCodexXData) as? [String: Any]
+        #expect(sideCodexXJSON?["request_id"] as? String == "codex-x")
+        #expect(sideCodexXJSON?["approved"] as? Bool == false)
     }
 
     @Test func inMemoryTransportRecordsSubmissions() async throws {

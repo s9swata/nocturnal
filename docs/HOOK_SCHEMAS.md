@@ -92,12 +92,20 @@ Set: `ClaudeEventDecoder.implementedEventTypes`
 
 ### PreToolUse permission matrix
 
+Permission / mode strings use a **semantic allowlist**, not mere presence.
+
 | Condition | Result |
 |-----------|--------|
 | `requires_permission` / `requiresPermission` / `needs_permission` == true | `waitingForApproval` |
-| `permission` or `permission_mode` string present | `waitingForApproval` |
+| `requires_permission` / … == false (explicit) | `running` (wins over mode string) |
+| `permission_mode` / `permission` ∈ `{ask, default, prompt}` | `waitingForApproval` |
+| `permission_mode` / `permission` ∈ `{none, off, allow, bypassPermissions, dontAsk, acceptEdits, …}` | `running` (no false approval) |
+| Unknown mode string | `running` (fail-open; no invented gate) |
 | Normalized `tool.approval_required` | `waitingForApproval` |
 | Otherwise | `running` + tool summary |
+
+Source of truth sets: `ClaudeEventDecoder.permissionModesRequiringApproval` and
+`ClaudeEventDecoder.permissionModesAutoAllow`.
 
 ### Claude raw stdin normalization
 
@@ -128,25 +136,39 @@ Use Codex and Claude fixtures under `Fixtures/` with the live socket (see `docs/
 
 `nocturnal-hook-forwarder`:
 
-1. Reads stdin (full or line-split; single object without trailing newline is one line)
-2. Optional `--wrap-source codex|claude` runs `EnvelopeNormalizer`
-3. Attempts connect (default 0.5s timeout) + write to socket
-4. **Always exits 0**
-5. Optional debug: `NOCTURNAL_FORWARDER_DEBUG=1`
+1. Reads stdin with a **bounded, timeout-aware** reader (size + wall-clock cap; not unbounded `readDataToEndOfFile`)
+2. Flags that require values (`--socket`, `--wrap-source`, `--session-id`, `--timeout`) reject a following flag or missing value instead of consuming it as the value (fail-open: ignore bad flag, continue with env/defaults)
+3. **Always** normalizes each line through `EnvelopeNormalizer` into a canonical `EventEnvelope` before socket send (optional `--wrap-source` only sets the default source hint). Raw upstream JSON is never sent as-is — `EventSocket` would soft-decode it to `eventType`/`sessionId` defaults
+4. Attempts connect (default 0.5s timeout) + write to socket
+5. **Always exits 0**
+6. Optional debug: `NOCTURNAL_FORWARDER_DEBUG=1`
 
 Agents must not block on Nocturnal availability.
+
+### Setup CLI parse rules
+
+`nocturnal-setup`:
+
+- Omitting `--product` installs for **all** products; omitting `--forwarder` auto-discovers the binary
+- Present-but-missing values (`--product` / `--forwarder` with no value, or followed by another flag) are **usage errors** (exit 2) — never silent default to all / auto-discovery
+- Generated hook commands **shell-quote** socket and binary paths (Application Support spaces are safe)
+- Native merge always **backups** existing config before overwrite (including malformed JSON) and **preserves** string-format Codex hook entries
 
 ---
 
 ## Response transport (out of band)
 
-User approvals / answers are written under Application Support `responses/`:
+User approvals / answers are written under Application Support `responses/`.
+Filenames use collision-free ``PathComponentEncoding`` (percent-encode unsafe bytes).
 
 | File | Shape |
 |------|--------|
-| `<request-id>.json` | `ResponseFileEnvelope` (`kind` + `payload`) |
-| `codex-<request-id>.json` | Flat Codex-ish decision |
-| `claude-<request-id>.json` | Flat Claude-ish permission |
-| `answer-<prompt-id>.json` | Flat question answer |
+| `<encoded-request-id>.json` | `ResponseFileEnvelope` (`kind` + `payload`) |
+| `codex/<encoded-request-id>.json` | Flat Codex-ish decision sidecar |
+| `claude/<encoded-request-id>.json` | Flat Claude-ish permission sidecar |
+| `answer/<encoded-prompt-id>.json` | Flat question answer sidecar |
+
+Sidecars live in **subdirectories** so envelope id `codex-x` never collides with
+the Codex sidecar for id `x`. Legacy flat `codex-<id>.json` names are not written.
 
 How agents/plugins poll this directory remains an open contract (see `CORE_HANDOFF.md`).

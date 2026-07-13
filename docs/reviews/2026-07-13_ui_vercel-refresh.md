@@ -1,8 +1,47 @@
-# Review notes — Vercel monochrome UI refresh
+# Review: Vercel monochrome UI refresh
 
-**Author:** nocturnal-ui  
-**Date:** 2026-07-13  
-**Scope:** Palette, compact pill chrome, expanded size, brand assets, demo removal, empty state
+- **Reviewer:** nocturnal-ui
+- **Date:** 2026-07-13
+- **Revision / branch:** `2f07919` / `codex/initial-nocturnal`
+- **Scope:** Palette, compact pill chrome, expanded size, brand assets, demo removal, empty state; overlay geometry ownership / constraint-cycle crash fix
+- **Decision:** Approve with nits
+
+## Summary
+
+Monochrome owl brand refresh plus compact-pill chrome and overlay geometry ownership fixes are shippable. AppKit window shadow and `NSHostingView` automatic sizing were the root causes of square margins and the constraint-cycle crash; contracts are locked in Core tests. **Approve with nits** on follow-up polish tracked separately.
+
+## Findings
+
+### P0 — must fix
+
+- None remaining for the monochrome refresh + geometry ownership work.
+
+### P1 — should fix before merge
+
+- None blocking for this refresh scope. Packaging + launch verification remains a manual smoke step on each machine.
+
+### P2 — nice to have
+
+- AppKit pixel-level shadow silhouette is not unit-testable under CLT; configuration contract tests stand in.
+- Multi-display sticky preference for pill placement remains a follow-up.
+
+## Contract checklist
+
+- [x] Builds (`swift build`)
+- [x] Tests (`swift test`) relevant to change
+- [x] Unknown hook events fail soft
+- [x] No telemetry / accounts / cloud
+- [x] No writes to real `~/.codex` / `~/.claude` in tests
+- [x] Sendable / actor boundaries respected
+- [x] Handoff doc updated if public API changed (`UI_HANDOFF.md`)
+
+## Open questions
+
+- Whether a future host-layout live assertion should run automatically in DEBUG packaged launches.
+
+## Decision
+
+**Approve with nits**
 
 ---
 

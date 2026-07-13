@@ -5,6 +5,20 @@ import Foundation
 /// MVP transport: write JSON files under Application Support `responses/`.
 /// Future: reply Unix socket or agent-specific IPC. Hooks / agent plugins
 /// can poll or inotify this directory.
+///
+/// ## On-disk layout (deterministic, collision-free)
+///
+/// ```
+/// responses/
+///   <encoded-request-id>.json           # ResponseFileEnvelope (canonical)
+///   codex/<encoded-request-id>.json     # Codex-ish flat decision sidecar
+///   claude/<encoded-request-id>.json    # Claude-ish permission sidecar
+///   answer/<encoded-request-id>.json    # Flat question answer sidecar
+/// ```
+///
+/// Filenames use ``PathComponentEncoding``. Sidecars live in **subdirectories**
+/// so envelope id `codex-x` never collides with the Codex sidecar for id `x`
+/// (older flat layout wrote both as `codex-x.json` in the same folder).
 public protocol ResponseTransporting: Sendable {
     func submit(_ response: AgentResponse) async throws
 }
@@ -47,19 +61,23 @@ public struct FileResponseTransport: ResponseTransporting {
     }
 
     /// Agent-oriented shapes some plugins can consume without learning `ResponseFileEnvelope`.
+    ///
+    /// Written under `responses/{codex,claude,answer}/` so they never share a
+    /// flat filename namespace with envelope files.
     private func writeAgentSpecific(
         response: AgentResponse,
         requestId: String,
         encoder: JSONEncoder
     ) throws {
-        let safe = requestId
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: ":", with: "_")
-        let dir = paths.responsesDirectory
+        let fm = FileManager.default
 
         switch response {
         case .approval(let decision):
-            // Codex-ish flat decision.
+            let codexURL = paths.responseSidecarFile(agent: "codex", requestId: requestId)
+            try fm.createDirectory(
+                at: codexURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
             let codex: [String: JSONValue] = [
                 "request_id": .string(decision.requestId),
                 "session_id": .string(decision.sessionId.rawValue),
@@ -67,39 +85,48 @@ public struct FileResponseTransport: ResponseTransporting {
                 "note": decision.note.map { .string($0) } ?? .null,
                 "decided_at": .string(ISO8601DateFormatter().string(from: decision.decidedAt)),
             ]
-            let codexURL = dir.appendingPathComponent("codex-\(safe).json")
             try encoder.encode(codex).write(to: codexURL, options: [.atomic])
 
-            // Claude-ish permission decision.
+            let claudeURL = paths.responseSidecarFile(agent: "claude", requestId: requestId)
+            try fm.createDirectory(
+                at: claudeURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
             let claude: [String: JSONValue] = [
                 "tool_use_id": .string(decision.requestId),
                 "session_id": .string(decision.sessionId.rawValue),
                 "permission": .string(decision.approved ? "allow" : "deny"),
                 "note": decision.note.map { .string($0) } ?? .null,
             ]
-            let claudeURL = dir.appendingPathComponent("claude-\(safe).json")
             try encoder.encode(claude).write(to: claudeURL, options: [.atomic])
 
         case .question(let answer):
+            let url = paths.responseSidecarFile(agent: "answer", requestId: requestId)
+            try fm.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
             let payload: [String: JSONValue] = [
                 "prompt_id": .string(answer.promptId),
                 "session_id": .string(answer.sessionId.rawValue),
                 "text": .string(answer.text),
                 "answered_at": .string(ISO8601DateFormatter().string(from: answer.answeredAt)),
             ]
-            let url = dir.appendingPathComponent("answer-\(safe).json")
             try encoder.encode(payload).write(to: url, options: [.atomic])
         }
     }
 
     /// Read a previously written response (tests / diagnostics).
+    /// Tries canonical path first, then legacy flat/sanitized names.
     public func load(requestId: String) throws -> ResponseFileEnvelope? {
-        let url = paths.responseFile(for: requestId)
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        let data = try Data(contentsOf: url)
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(ResponseFileEnvelope.self, from: data)
+        for url in paths.responseFileCandidates(for: requestId) {
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            let data = try Data(contentsOf: url)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            return try decoder.decode(ResponseFileEnvelope.self, from: data)
+        }
+        return nil
     }
 }
 

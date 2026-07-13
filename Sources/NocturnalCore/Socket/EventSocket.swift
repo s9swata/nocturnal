@@ -41,7 +41,9 @@ public struct EventSocketDiagnostics: Sendable, Equatable {
 /// Server side: app listens for NDJSON lines from hook forwarders.
 ///
 /// Accept loop is cancel-safe: ``stop()`` closes the listening fd so a blocked
-/// `accept` unblocks. Multi-client reads fan into a single ``AsyncStream``.
+/// `accept` unblocks. Client **reads** run **off actor isolation** so an idle
+/// client cannot stall accept / a second client / `stop()`. Multi-client reads
+/// fan into a single ``AsyncStream``.
 public actor EventSocketServer {
     public private(set) var isRunning = false
     public private(set) var diagnostics = EventSocketDiagnostics()
@@ -50,6 +52,8 @@ public actor EventSocketServer {
     private let maxLineBytes: Int
     private var listener: LocalUnixListener?
     private var clientTasks: [UUID: Task<Void, Never>] = [:]
+    /// Open client handles so ``stop()`` can close them and unblock idle reads.
+    private var clientHandles: [UUID: FileHandle] = [:]
     private var acceptTask: Task<Void, Never>?
     private var eventContinuation: AsyncStream<EventEnvelope>.Continuation?
     private var eventStream: AsyncStream<EventEnvelope>?
@@ -91,6 +95,11 @@ public actor EventSocketServer {
         acceptTask = nil
         listener?.close()
         listener = nil
+        // Close client fds so off-actor blocking reads unblock promptly.
+        for handle in clientHandles.values {
+            try? handle.close()
+        }
+        clientHandles.removeAll()
         for task in clientTasks.values {
             task.cancel()
         }
@@ -115,6 +124,7 @@ public actor EventSocketServer {
                 }
                 diagnostics.acceptedClients &+= 1
                 let clientID = UUID()
+                clientHandles[clientID] = handle
                 let task = Task { [weak self] in
                     guard let self else { return }
                     await self.readClient(handle, id: clientID)
@@ -132,27 +142,33 @@ public actor EventSocketServer {
     private func readClient(_ handle: FileHandle, id: UUID) async {
         defer {
             try? handle.close()
+            clientHandles[id] = nil
             clientTasks[id] = nil
             diagnostics.closedClients &+= 1
         }
 
         let decoder = makeEnvelopeDecoder()
         var buffer = Data()
+        let lineLimit = maxLineBytes
 
         while !Task.isCancelled && isRunning {
-            let chunk: Data
+            // Blocking read off actor isolation so accept / stop / other clients
+            // remain responsive while this client is idle.
+            let chunk: Data?
             do {
-                guard let data = try handle.read(upToCount: 8192), !data.isEmpty else {
-                    break
-                }
-                chunk = data
+                chunk = try await Self.readChunkOffActor(handle, maxBytes: 8192)
             } catch {
-                diagnostics.lastError = error.localizedDescription
+                if isRunning && !Task.isCancelled {
+                    diagnostics.lastError = error.localizedDescription
+                }
+                break
+            }
+            guard let data = chunk, !data.isEmpty else {
                 break
             }
 
-            buffer.append(chunk)
-            if buffer.count > maxLineBytes * 2 {
+            buffer.append(data)
+            if buffer.count > lineLimit * 2 {
                 // Pathological client: drop buffer, keep listening for next newline.
                 diagnostics.decodeFailures &+= 1
                 diagnostics.lastError = "client buffer exceeded limit"
@@ -169,9 +185,9 @@ public actor EventSocketServer {
                 guard !line.isEmpty else { continue }
                 diagnostics.linesReceived &+= 1
 
-                if line.count > maxLineBytes {
+                if line.count > lineLimit {
                     diagnostics.decodeFailures &+= 1
-                    diagnostics.lastError = "line exceeded \(maxLineBytes) bytes"
+                    diagnostics.lastError = "line exceeded \(lineLimit) bytes"
                     continue
                 }
 
@@ -183,6 +199,20 @@ public actor EventSocketServer {
                     // Fail-open: drop bad lines, never crash the server.
                     diagnostics.decodeFailures &+= 1
                     diagnostics.lastError = "decode: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    /// Perform a blocking `FileHandle.read` on a utility queue, then hop back.
+    private static func readChunkOffActor(_ handle: FileHandle, maxBytes: Int) async throws -> Data? {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                do {
+                    let data = try handle.read(upToCount: maxBytes)
+                    continuation.resume(returning: data)
+                } catch {
+                    continuation.resume(throwing: error)
                 }
             }
         }
@@ -259,6 +289,8 @@ final class LocalUnixListener: @unchecked Sendable {
 
         var on: Int32 = 1
         _ = setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
+        // Avoid SIGPIPE if a client disconnects mid-write (server rarely writes, but safe).
+        _ = setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -323,6 +355,14 @@ final class LocalUnixListener: @unchecked Sendable {
                         continuation.resume(throwing: EventSocketError.listenFailed("accept failed: \(err)"))
                     }
                 } else {
+                    var on: Int32 = 1
+                    _ = setsockopt(
+                        clientFD,
+                        SOL_SOCKET,
+                        SO_NOSIGPIPE,
+                        &on,
+                        socklen_t(MemoryLayout<Int32>.size)
+                    )
                     // Independent lifetime from the listener.
                     let handle = FileHandle(fileDescriptor: clientFD, closeOnDealloc: true)
                     continuation.resume(returning: handle)
@@ -354,6 +394,10 @@ enum LocalUnixClient {
             throw EventSocketError.connectFailed("socket() failed: \(errno)")
         }
         defer { Darwin.close(fd) }
+
+        // Prevent SIGPIPE killing the hook process if the peer closes early.
+        var on: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -418,6 +462,7 @@ enum LocalUnixClient {
             var sent = 0
             let total = buffer.count
             while sent < total {
+                // MSG_NOSIGNAL is Linux; on Darwin SO_NOSIGPIPE above is the contract.
                 let n = Darwin.send(fd, base.advanced(by: sent), total - sent, 0)
                 if n < 0 {
                     if errno == EINTR { continue }

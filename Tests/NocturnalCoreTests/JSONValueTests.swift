@@ -16,7 +16,8 @@ struct JSONValueTests {
                 "ok": .bool(true),
                 "nested": .object(["k": .string("v")]),
             ],
-            raw: ["x": .null]
+            raw: ["x": .null],
+            sourceRaw: nil
         )
 
         let data = try TestSupport.isoEncoder().encode(envelope)
@@ -29,6 +30,51 @@ struct JSONValueTests {
         #expect(decoded.schemaVersion == EventEnvelope.currentSchemaVersion)
         #expect(decoded.eventType == "session.started")
         #expect(decoded.source == .codex)
+    }
+
+    @Test func sourceRawSurvivesEncodeDecodeHops() throws {
+        let original = EventEnvelope(
+            source: .unknown,
+            eventType: "custom.ping",
+            sessionId: "sr-1",
+            payload: [:],
+            raw: [:],
+            sourceRaw: "nocturnal-experimental"
+        )
+        let data = try TestSupport.isoEncoder().encode(original)
+        let once = try TestSupport.isoDecoder().decode(EventEnvelope.self, from: data)
+        #expect(once.sourceRaw == "nocturnal-experimental")
+        #expect(once.source == .unknown)
+
+        let data2 = try TestSupport.isoEncoder().encode(once)
+        let twice = try TestSupport.isoDecoder().decode(EventEnvelope.self, from: data2)
+        #expect(twice.sourceRaw == "nocturnal-experimental")
+
+        // Explicit sourceRaw alongside known source also preserved.
+        let withBoth = EventEnvelope(
+            source: .codex,
+            eventType: "session.started",
+            sessionId: "sr-2",
+            sourceRaw: "codex-fork"
+        )
+        let data3 = try TestSupport.isoEncoder().encode(withBoth)
+        let decodedBoth = try TestSupport.isoDecoder().decode(EventEnvelope.self, from: data3)
+        #expect(decodedBoth.source == .codex)
+        #expect(decodedBoth.sourceRaw == "codex-fork")
+    }
+
+    @Test func stringValueUsesExactIntegerConversion() {
+        #expect(JSONValue.number(42).stringValue == "42")
+        #expect(JSONValue.number(42.5).stringValue == "42.5")
+        #expect(JSONValue.number(Double.nan).stringValue == nil)
+        #expect(JSONValue.number(Double.infinity).stringValue == nil)
+        // Exact Int32-range integer.
+        #expect(JSONValue.number(2_147_483_647).exactInt32Value == Int32.max)
+        // Outside Int32 — no trap; exactInt32 nil.
+        #expect(JSONValue.number(3_000_000_000).exactInt32Value == nil)
+        #expect(JSONValue.number(3_000_000_000).exactIntValue != nil)
+        #expect(JSONValue.number(12.0).exactIntValue == 12)
+        #expect(JSONValue.number(12.1).exactIntValue == nil)
     }
 
     @Test func failOpenForwarderEmptyLine() {

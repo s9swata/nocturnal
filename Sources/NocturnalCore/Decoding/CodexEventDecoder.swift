@@ -65,13 +65,24 @@ public struct CodexEventDecoder: EventDecoding, Sendable {
         {
             jump.codexDeepLink = url
         }
-        if let pid = payload["pid"]?.numberValue ?? payload["process_id"]?.numberValue {
-            jump.processIdentifier = Int32(pid)
+        // Range-safe PID conversion — oversized / non-integral / untrusted values
+        // must not trap via truncating Int32(Double).
+        if let pid = payload["pid"]?.exactInt32Value
+            ?? payload["process_id"]?.exactInt32Value
+        {
+            jump.processIdentifier = pid
+        } else if let raw = payload["pid"] ?? payload["process_id"],
+                  let text = raw.stringValue ?? raw.numberValue.map({ String($0) })
+        {
+            // Preserve unparseable pid in jump-back extra for diagnostics.
+            jump.extra["pid_raw"] = text
         }
         if jump.workingDirectory != nil
             || jump.terminalBundleID != nil
             || jump.editorURL != nil
             || jump.codexDeepLink != nil
+            || jump.processIdentifier != nil
+            || !jump.extra.isEmpty
         {
             result.jumpBack = jump
         }

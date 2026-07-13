@@ -80,13 +80,14 @@ struct SessionRowView: View {
         }
 
         if let approval = session.pendingApproval {
+            // Bare A/D shortcuts live on the overlay / app command layer only —
+            // per-row shortcuts would collide when multiple rows are visible.
             Button("Deny") {
                 Task { await model.approve(approval, approved: false) }
             }
             .buttonStyle(.borderless)
             .font(.caption)
             .foregroundStyle(NocturnalPalette.accentDanger)
-            .keyboardShortcut("d", modifiers: [])
             .accessibilityLabel("Deny \(approval.toolName)")
 
             Button("Approve") {
@@ -96,7 +97,6 @@ struct SessionRowView: View {
             .controlSize(.small)
             .tint(NocturnalPalette.accentAttention)
             .font(.caption)
-            .keyboardShortcut("a", modifiers: [])
             .accessibilityLabel("Approve \(approval.toolName)")
             .help(approval.summary)
         } else if let prompt = session.pendingQuestion {

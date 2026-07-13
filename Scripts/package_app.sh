@@ -250,16 +250,108 @@ if [[ ${#SWIFTPM_BUNDLES[@]} -gt 0 ]]; then
   done
 fi
 
-# Embed frameworks if any exist in the build folder.
-FRAMEWORK_DIRS=(".build/$CONF" ".build/${ARCH_LIST[0]}-apple-macosx/$CONF")
-for dir in "${FRAMEWORK_DIRS[@]}"; do
-  if compgen -G "${dir}/*.framework" >/dev/null; then
-    cp -R "${dir}/"*.framework "$APP/Contents/Frameworks/"
-    chmod -R a+rX "$APP/Contents/Frameworks"
-    install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/$APP_NAME" || true
-    break
+# ---------------------------------------------------------------------------
+# Framework packaging (architecture-safe)
+#
+# Policy (documented choice):
+# - Nocturnal currently ships **zero** third-party frameworks. Empty Frameworks/
+#   is expected and not an error.
+# - When frameworks appear under a build product dir, require the same basenames
+#   for every arch in ARCH_LIST; fail clearly on partial coverage.
+# - Single-arch: copy frameworks as-is.
+# - Multi-arch (universal): copy structure from the first arch, then `lipo -create`
+#   matching framework executables (top-level + nested *.framework binaries).
+# - Do not silently copy only one architecture into a multi-arch app bundle.
+# ---------------------------------------------------------------------------
+lipo_framework_tree() {
+  # dest_fw is already a copy of sources[0]; replace Mach-O slices with lipo merges.
+  local dest_fw="$1"
+  shift
+  local sources=("$@")
+
+  while IFS= read -r -d '' dest_bin; do
+    # Only merge real Mach-O files (skip scripts).
+    if ! file "$dest_bin" | grep -q 'Mach-O'; then
+      continue
+    fi
+    local rel="${dest_bin#"$dest_fw"/}"
+    local bins=()
+    local src
+    for src in "${sources[@]}"; do
+      local candidate="$src/$rel"
+      if [[ ! -f "$candidate" ]]; then
+        echo "ERROR: framework binary missing for arch merge: $candidate" >&2
+        exit 1
+      fi
+      bins+=("$candidate")
+    done
+    lipo -create "${bins[@]}" -output "$dest_bin"
+    verify_binary_arches "$dest_bin" "${ARCH_LIST[@]}"
+  done < <(find "$dest_fw" -type f -perm -111 -print0 2>/dev/null)
+}
+
+embed_frameworks() {
+  local dest="$APP/Contents/Frameworks"
+  mkdir -p "$dest"
+
+  local arch_dirs=()
+  local arch
+  for arch in "${ARCH_LIST[@]}"; do
+    arch_dirs+=("$(dirname "$(build_product_path "$APP_NAME" "$arch")")")
+  done
+
+  # Union of framework basenames across arch build dirs (bash 3.2-safe).
+  local names_file
+  names_file=$(mktemp)
+  local dir fw base
+  for dir in "${arch_dirs[@]}"; do
+    shopt -s nullglob
+    for fw in "$dir"/*.framework; do
+      basename "$fw" >>"$names_file"
+    done
+    shopt -u nullglob
+  done
+
+  if [[ ! -s "$names_file" ]]; then
+    rm -f "$names_file"
+    echo "Frameworks: none (OK — product does not bundle third-party frameworks)"
+    return 0
   fi
-done
+
+  local unique_names
+  unique_names=$(sort -u "$names_file")
+  rm -f "$names_file"
+  local name_count
+  name_count=$(printf '%s\n' "$unique_names" | grep -c . || true)
+  echo "Frameworks: packaging ${name_count} bundle(s) for arch(es): ${ARCH_LIST[*]}"
+
+  while IFS= read -r base; do
+    [[ -z "$base" ]] && continue
+    local sources=()
+    for dir in "${arch_dirs[@]}"; do
+      if [[ -d "$dir/$base" ]]; then
+        sources+=("$dir/$base")
+      else
+        echo "ERROR: framework $base missing under $dir (required for arches: ${ARCH_LIST[*]})" >&2
+        echo "ERROR: refusing to ship a single-arch framework inside a multi-arch app." >&2
+        exit 1
+      fi
+    done
+
+    rm -rf "$dest/$base"
+    if [[ ${#ARCH_LIST[@]} -eq 1 ]]; then
+      cp -R "${sources[0]}" "$dest/$base"
+    else
+      cp -R "${sources[0]}" "$dest/$base"
+      lipo_framework_tree "$dest/$base" "${sources[@]}"
+    fi
+  done <<<"$unique_names"
+
+  chmod -R a+rX "$dest"
+  install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/$APP_NAME" || true
+}
+
+embed_frameworks
 
 if [[ -n "${ICON_TARGET}" && -f "$ICON_TARGET" ]]; then
   cp "$ICON_TARGET" "$APP/Contents/Resources/Icon.icns"

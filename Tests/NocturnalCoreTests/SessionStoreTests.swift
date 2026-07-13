@@ -225,4 +225,138 @@ struct SessionStoreTests {
         let all = await store.allSessions()
         #expect(all.count == 2)
     }
+
+    // MARK: - Stale / terminal / response-id / replaceAll
+
+    @Test func olderEventDoesNotReviveTerminalSession() async {
+        // Use near-now timestamps so terminalRetention prune does not evict the session.
+        let store = SessionStore(
+            policy: SessionStorePolicy(terminalRetention: 60 * 60, autoPersist: false)
+        )
+        let id = "term-1"
+        let now = Date()
+        let t0 = now.addingTimeInterval(-30)
+        let t1 = now.addingTimeInterval(-10)
+        let tOld = now.addingTimeInterval(-60)
+
+        let started = await store.apply(EventEnvelope(
+            source: .codex,
+            eventType: "session.started",
+            sessionId: id,
+            timestamp: t0,
+            payload: ["title": .string("Done soon")]
+        ))
+        #expect(started.state == .running)
+        #expect(started.updatedAt == t0)
+
+        let completed = await store.apply(EventEnvelope(
+            source: .codex,
+            eventType: "session.completed",
+            sessionId: id,
+            timestamp: t1
+        ))
+        #expect(completed.state == .completed)
+        #expect(completed.updatedAt == t1)
+        #expect(await store.session(id: SessionID(id))?.state == .completed)
+
+        // Late/old start must not rewind to running.
+        let stale = await store.apply(EventEnvelope(
+            source: .codex,
+            eventType: "session.started",
+            sessionId: id,
+            timestamp: tOld,
+            payload: ["title": .string("stale")]
+        ))
+        #expect(stale.state == .completed)
+        #expect(stale.updatedAt == t1)
+        let session = await store.session(id: SessionID(id))
+        #expect(session?.state == .completed)
+        #expect(session?.updatedAt == t1)
+    }
+
+    @Test func olderEventDoesNotRewindNewerRunningSession() async {
+        let store = SessionStore(policy: SessionStorePolicy(autoPersist: false))
+        let id = "stale-run"
+        let now = Date()
+        let newer = now.addingTimeInterval(-5)
+        let older = now.addingTimeInterval(-60)
+
+        _ = await store.apply(EventEnvelope(
+            source: .codex,
+            eventType: "session.started",
+            sessionId: id,
+            timestamp: newer,
+            payload: ["title": .string("new")]
+        ))
+        _ = await store.apply(EventEnvelope(
+            source: .codex,
+            eventType: "session.failed",
+            sessionId: id,
+            timestamp: older,
+            payload: ["error": .string("old fail")]
+        ))
+        let session = await store.session(id: SessionID(id))
+        #expect(session?.state == .running)
+        #expect(session?.updatedAt == newer)
+    }
+
+    @Test func mismatchedApprovalResponseIsNoOp() async {
+        let store = SessionStore(policy: SessionStorePolicy(autoPersist: false))
+        _ = await store.apply(EventEnvelope(
+            source: .codex,
+            eventType: "tool.approval_required",
+            sessionId: "m-apr",
+            payload: [
+                "request_id": .string("real-id"),
+                "tool": .string("shell"),
+                "summary": .string("run"),
+            ]
+        ))
+        let before = await store.session(id: SessionID("m-apr"))
+        #expect(before?.state == .waitingForApproval)
+
+        let result = await store.applyLocalResponse(.approval(ApprovalDecision(
+            requestId: "wrong-id",
+            sessionId: SessionID("m-apr"),
+            approved: true
+        )))
+        #expect(result?.state == .waitingForApproval)
+        #expect(result?.pendingApproval?.id == "real-id")
+        #expect(result?.summary != "Approved")
+    }
+
+    @Test func mismatchedQuestionResponseIsNoOp() async {
+        let store = SessionStore(policy: SessionStorePolicy(autoPersist: false))
+        _ = await store.apply(EventEnvelope(
+            source: .codex,
+            eventType: "agent.question",
+            sessionId: "m-q",
+            payload: [
+                "prompt_id": .string("pq-real"),
+                "prompt": .string("?"),
+            ]
+        ))
+        let result = await store.applyLocalResponse(.question(QuestionAnswer(
+            promptId: "pq-wrong",
+            sessionId: SessionID("m-q"),
+            text: "nope"
+        )))
+        #expect(result?.state == .waitingForInput)
+        #expect(result?.pendingQuestion?.id == "pq-real")
+    }
+
+    @Test func replaceAllHandlesDuplicateIdsLastWinsWithoutTrapping() async {
+        let store = SessionStore(policy: SessionStorePolicy(autoPersist: false))
+        let first = Session(id: SessionID("dup"), source: .codex, state: .idle, title: "first")
+        let second = Session(id: SessionID("dup"), source: .claude, state: .running, title: "second")
+        let other = Session(id: SessionID("other"), source: .codex, state: .idle, title: "other")
+        await store.replaceAll([first, other, second])
+
+        let all = await store.allSessions()
+        #expect(all.count == 2)
+        let dup = await store.session(id: SessionID("dup"))
+        #expect(dup?.title == "second")
+        #expect(dup?.source == .claude)
+        #expect(dup?.state == .running)
+    }
 }

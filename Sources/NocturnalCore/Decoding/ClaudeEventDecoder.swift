@@ -35,6 +35,27 @@ public struct ClaudeEventDecoder: EventDecoding, Sendable {
         "agent.question_answered",
     ]
 
+    /// `permission` / `permission_mode` values that mean the user must approve.
+    public static let permissionModesRequiringApproval: Set<String> = [
+        "ask",
+        "default",
+        "prompt",
+    ]
+
+    /// `permission` / `permission_mode` values that mean auto-allow / no prompt.
+    /// Presence of these must **not** create a false approval request.
+    public static let permissionModesAutoAllow: Set<String> = [
+        "none",
+        "off",
+        "allow",
+        "bypasspermissions",
+        "bypass_permissions",
+        "dontask",
+        "dont_ask",
+        "acceptedits",
+        "accept_edits",
+    ]
+
     public init() {}
 
     public func decode(_ envelope: EventEnvelope) -> DecodedEvent {
@@ -82,19 +103,16 @@ public struct ClaudeEventDecoder: EventDecoding, Sendable {
         case "session.failed":
             result.state = .failed
         case "PreToolUse", "tool.approval_required":
-            // Permission matrix:
-            // - requires_permission / requiresPermission == true → approval
-            // - permission / permission_mode present → approval
+            // Permission matrix (see docs/HOOK_SCHEMAS.md):
+            // - requires_permission / requiresPermission / needs_permission == true → approval
+            // - permission / permission_mode on allowlist (ask/default/prompt) → approval
+            // - permission / permission_mode auto-allow (none/off/allow/bypassPermissions) → running
             // - normalized alias tool.approval_required → always approval
             // - otherwise running + tool summary
-            let requiresPermission = EventDecodeHelpers.bool(
-                payload,
-                "requires_permission",
-                "requiresPermission",
-                "needs_permission"
-            ) == true
-                || type == "tool.approval_required"
-                || EventDecodeHelpers.string(payload, "permission", "permission_mode") != nil
+            let requiresPermission = Self.shouldRequestApproval(
+                eventType: type,
+                payload: payload
+            )
 
             if requiresPermission {
                 let requestId = EventDecodeHelpers.string(
@@ -157,6 +175,58 @@ public struct ClaudeEventDecoder: EventDecoding, Sendable {
         }
 
         return result
+    }
+
+    /// Semantic permission mapping for PreToolUse / tool.approval_required.
+    public static func shouldRequestApproval(
+        eventType: String,
+        payload: [String: JSONValue]
+    ) -> Bool {
+        if eventType == "tool.approval_required" {
+            return true
+        }
+        if EventDecodeHelpers.bool(
+            payload,
+            "requires_permission",
+            "requiresPermission",
+            "needs_permission"
+        ) == true {
+            return true
+        }
+        if EventDecodeHelpers.bool(
+            payload,
+            "requires_permission",
+            "requiresPermission",
+            "needs_permission"
+        ) == false {
+            // Explicit false wins over a co-present mode string.
+            return false
+        }
+
+        // Check permission_mode then permission with allowlist semantics.
+        if let mode = EventDecodeHelpers.string(payload, "permission_mode", "permissionMode") {
+            return permissionModeRequiresApproval(mode)
+        }
+        if let mode = EventDecodeHelpers.string(payload, "permission") {
+            return permissionModeRequiresApproval(mode)
+        }
+        return false
+    }
+
+    /// - ask / default / prompt → needs approval
+    /// - none / off / allow / bypassPermissions → no approval
+    /// - unknown mode → no false-positive approval (fail open to running)
+    public static func permissionModeRequiresApproval(_ raw: String) -> Bool {
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        if permissionModesRequiringApproval.contains(normalized) {
+            return true
+        }
+        if permissionModesAutoAllow.contains(normalized) {
+            return false
+        }
+        // Unknown mode: do not invent an approval gate.
+        return false
     }
 
     private func riskHint(from payload: [String: JSONValue]) -> ApprovalRiskHint {

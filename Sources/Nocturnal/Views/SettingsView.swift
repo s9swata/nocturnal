@@ -26,12 +26,18 @@ struct SettingsView: View {
             Section {
                 Toggle("Reduce motion", isOn: reduceMotionBinding)
                     .help("Prefer cross-fades and instant layout changes. Also respects system Reduce Motion.")
+                    .disabled(!model.isBootstrapped)
                 Toggle("Sound", isOn: soundBinding)
                     .help("Soft attention sound when a session needs approval or input. Off by default.")
+                    .disabled(!model.isBootstrapped)
             } header: {
                 Text("Quiet")
             } footer: {
-                if systemReduceMotion {
+                if !model.isBootstrapped {
+                    Text("Loading preferences… controls unlock after startup.")
+                        .font(.caption)
+                        .accessibilityLabel("Loading preferences. Controls unlock after startup.")
+                } else if systemReduceMotion {
                     Text("System Reduce Motion is on; animations stay minimal regardless of the toggle.")
                         .font(.caption)
                 }
@@ -40,9 +46,11 @@ struct SettingsView: View {
             Section("Sessions") {
                 Toggle("Floating pill", isOn: pillBinding)
                     .help("Show a non-activating pill at the top of the screen.")
+                    .disabled(!model.isBootstrapped)
                 Stepper(value: maxSessionsBinding, in: 3...40) {
                     Text("Max visible sessions: \(model.settings.maxVisibleSessions)")
                 }
+                .disabled(!model.isBootstrapped)
             }
 
             Section("Status") {
@@ -92,9 +100,21 @@ struct SettingsView: View {
                     Button("Copy socket path") {
                         model.copySocketPath()
                     }
+                    .disabled(!SetupCommandFormatting.isAvailablePathDisplay(model.socketPathDisplay))
                     Button("Reveal App Support") {
                         model.revealAppSupport()
                     }
+                    .disabled(!model.canRevealAppSupport)
+                    .help(
+                        model.canRevealAppSupport
+                            ? "Show Application Support in Finder"
+                            : "Available after startup resolves the local path"
+                    )
+                    .accessibilityHint(
+                        model.canRevealAppSupport
+                            ? "Reveals Application Support in Finder"
+                            : "Unavailable until local path is resolved"
+                    )
                 }
             } header: {
                 Text("Local paths")

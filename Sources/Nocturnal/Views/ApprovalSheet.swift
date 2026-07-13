@@ -7,6 +7,7 @@ struct ApprovalSheet: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @FocusState private var focusedAction: ActionFocus?
+    @State private var isSubmitting = false
 
     private enum ActionFocus: Hashable {
         case deny
@@ -61,29 +62,27 @@ struct ApprovalSheet: View {
                     model.dismissSheets()
                 }
                 .keyboardShortcut(.cancelAction)
+                .disabled(isSubmitting)
 
                 Spacer()
 
                 Button("Deny") {
-                    Task {
-                        await model.approve(request, approved: false)
-                        dismiss()
-                    }
+                    submit(approved: false)
                 }
                 .keyboardShortcut("d", modifiers: [])
                 .focused($focusedAction, equals: .deny)
+                .disabled(isSubmitting)
                 .accessibilityLabel("Deny \(request.toolName)")
 
                 Button("Approve") {
-                    Task {
-                        await model.approve(request, approved: true)
-                        dismiss()
-                    }
+                    submit(approved: true)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(NocturnalPalette.accentAttention)
+                // Return is the default action for the simple approve sheet.
                 .keyboardShortcut(.defaultAction)
                 .focused($focusedAction, equals: .approve)
+                .disabled(isSubmitting)
                 .accessibilityLabel("Approve \(request.toolName)")
             }
         }
@@ -94,6 +93,19 @@ struct ApprovalSheet: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Approval for \(request.toolName)")
     }
+
+    private func submit(approved: Bool) {
+        guard !isSubmitting else { return }
+        isSubmitting = true
+        Task {
+            let ok = await model.approve(request, approved: approved)
+            if ok {
+                dismiss()
+            } else {
+                isSubmitting = false
+            }
+        }
+    }
 }
 
 struct QuestionSheet: View {
@@ -103,7 +115,12 @@ struct QuestionSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var answerText: String = ""
+    @State private var isSubmitting = false
     @FocusState private var answerFocused: Bool
+
+    private var canSend: Bool {
+        !answerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isSubmitting
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -137,6 +154,7 @@ struct QuestionSheet: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .disabled(isSubmitting)
                         .accessibilityLabel("Choose \(choice)")
                     }
                 }
@@ -151,6 +169,7 @@ struct QuestionSheet: View {
                 .lineLimit(2...5)
                 .textFieldStyle(.roundedBorder)
                 .focused($answerFocused)
+                .disabled(isSubmitting)
                 .accessibilityLabel("Answer text")
             }
 
@@ -160,20 +179,20 @@ struct QuestionSheet: View {
                     model.dismissSheets()
                 }
                 .keyboardShortcut(.cancelAction)
+                .disabled(isSubmitting)
 
                 Spacer()
 
                 Button("Send") {
-                    Task {
-                        await model.answer(prompt, text: answerText)
-                        dismiss()
-                    }
+                    submitAnswer()
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(NocturnalPalette.accentAttention)
-                .keyboardShortcut(.defaultAction)
-                .disabled(answerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                // Multiline field: Command-Return sends; bare Return inserts a newline.
+                .keyboardShortcut(.return, modifiers: [.command])
+                .disabled(!canSend)
                 .accessibilityLabel("Send answer")
+                .accessibilityHint("Command-Return to send")
             }
         }
         .padding(20)
@@ -182,5 +201,18 @@ struct QuestionSheet: View {
         .onAppear { answerFocused = true }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Question for \(session.title)")
+    }
+
+    private func submitAnswer() {
+        guard canSend else { return }
+        isSubmitting = true
+        Task {
+            let ok = await model.answer(prompt, text: answerText)
+            if ok {
+                dismiss()
+            } else {
+                isSubmitting = false
+            }
+        }
     }
 }

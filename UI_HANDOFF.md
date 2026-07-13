@@ -79,6 +79,9 @@ Sources/Nocturnal/
 | Jump back | `JumpBackCoordinator().jump(using:)` |
 | Settings | `SettingsStore.save` |
 | Empty-state actions | `copySetupCommand`, `revealSetupHelper`, `openSettings` (env) |
+| Setup command | `SetupCommandFormatting.installAllCommand(binaryPath:)` — shell-quotes packaged paths |
+| Reveal App Support | `canRevealAppSupport` after `PersistencePaths.resolve`; unavailable status otherwise |
+| Approve / answer | `approve` / `answer` return `Bool` success; sheets dismiss only on success |
 
 UI **never** mutates session maps directly.
 
@@ -94,17 +97,18 @@ UI **never** mutates session maps directly.
 
 | Control / region | Coverage |
 |------------------|----------|
-| Pill | Label with count/listening; hint to expand |
+| Pill | Label with count/listening; hint to expand; opacity-only attention breath |
 | Expanded panel | Container label; Escape collapses |
-| Session rows | Combined title + state + source + summary; selected trait |
-| Approve / Deny | Button labels; VO actions on row |
-| Empty state | Container label; working Settings / copy / reveal buttons |
+| Session list | Container label; keyboard-nav hint (↑/↓, A/D) |
+| Session rows | Combined title + state + source + summary; selected trait; **no** per-row A/D shortcuts |
+| Approve / Deny | Button labels; VO actions on row; centralized A/D on overlay + ⌘⌥A/D menu |
+| Empty state | Container label; Settings / copy / reveal; copy hint is outcome-based; command as a11y value |
 | Jump back | Button + VO action |
-| Answer sheet | Focused field; Send disabled when empty |
-| Approval sheet | Default focus on Approve; risk/summary/detail labeled |
+| Answer sheet | Focused field; Send disabled when empty/in-flight; **⌘↩** sends (Return stays newline) |
+| Approval sheet | Default focus on Approve; Return = default action; dismiss only after successful submit |
 | Status line | `Status: …` accessibility label (menu, window, overlay) |
-| Settings | Sectioned forms; copy commands labeled |
-| Keyboard | ↑/↓; A/D; ⌘⌥A / ⌘⌥D; ⌘J/K; ⌘⇧P expand pill; Escape collapse |
+| Settings | Sectioned forms; prefs disabled until `isBootstrapped`; Reveal App Support gated on resolved path |
+| Keyboard | ↑/↓; A/D (overlay); ⌘⌥A / ⌘⌥D; ⌘J/K; ⌘⇧P expand pill; Escape collapse |
 
 ---
 
@@ -132,7 +136,7 @@ Follows `.impeccable.md`:
 
 ## Compact pill chrome fix
 
-See `docs/reviews/vercel-ui-refresh.md`.
+See `docs/reviews/2026-07-13_ui_vercel-refresh.md`.
 
 **Root cause:** `NSPanel.hasShadow = true` draws a rectangular system shadow around the content rect; any opaque hosting fill compounds the “square margin” look.
 
@@ -142,7 +146,7 @@ See `docs/reviews/vercel-ui-refresh.md`.
 
 ## Overlay geometry ownership (constraint-cycle crash)
 
-See `docs/reviews/vercel-ui-refresh.md` (section *Overlay constraint-cycle crash*).
+See `docs/reviews/2026-07-13_ui_vercel-refresh.md` (section *Overlay constraint-cycle crash*).
 
 **Root cause:** `NSHostingView` automatic window sizing (`updateAnimatedWindowSize` via default `sizingOptions`) fought manual `NSPanel.setFrame`, compressed empty state to ~225×218, narrowed expanded width, and looped Auto Layout until `NSGenericException`.
 

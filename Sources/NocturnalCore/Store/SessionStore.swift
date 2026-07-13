@@ -156,6 +156,10 @@ public actor SessionStore {
     // MARK: - Mutations
 
     /// Decode and apply an envelope. Unknown events update metadata without crashing.
+    ///
+    /// **Stale-event policy:** envelopes older than the session's `updatedAt` never
+    /// rewind state or revive a terminal session. Metadata / title / jump-back may
+    /// still merge when useful, but lifecycle state is left alone.
     @discardableResult
     public func apply(_ envelope: EventEnvelope) async -> Session {
         let decoded = decoder.decode(envelope)
@@ -178,6 +182,12 @@ public actor SessionStore {
             updatedAt: envelope.timestamp
         )
 
+        let isExisting = sessionsByID[sessionID] != nil
+        let isStaleEvent = isExisting && envelope.timestamp < session.updatedAt
+        let isTerminal = session.state.isTerminal
+        // Older events must not rewind or revive terminal / newer sessions.
+        let allowLifecycleMutation = !isStaleEvent && !(isTerminal && envelope.timestamp <= session.updatedAt)
+
         // Prefer a known source over unknown when we learn more.
         if session.source == .unknown, source != .unknown {
             session.source = source
@@ -186,8 +196,11 @@ public actor SessionStore {
         if let title = decoded.titleHint, !title.isEmpty {
             session.title = title
         }
-        if let summary = decoded.summaryHint {
-            session.summary = summary
+        if let summary = decoded.summaryHint, allowLifecycleMutation || !isTerminal {
+            // Allow summary refresh on non-lifecycle stale events only when not terminal revival.
+            if allowLifecycleMutation || !isStaleEvent {
+                session.summary = summary
+            }
         }
         if let cwd = decoded.workingDirectory {
             session.workingDirectory = cwd
@@ -195,29 +208,33 @@ public actor SessionStore {
             jump.workingDirectory = cwd
             session.jumpBack = jump
         }
-        if let state = decoded.state {
-            session.state = state
-        }
-        if let approval = decoded.approval {
-            session.pendingApproval = approval
-            session.state = .waitingForApproval
-        }
-        if let question = decoded.question {
-            session.pendingQuestion = question
-            session.state = .waitingForInput
-        }
-        if decoded.clearApproval {
-            session.pendingApproval = nil
-            if session.state == .waitingForApproval {
-                session.state = decoded.state ?? .running
+
+        if allowLifecycleMutation {
+            if let state = decoded.state {
+                session.state = state
+            }
+            if let approval = decoded.approval {
+                session.pendingApproval = approval
+                session.state = .waitingForApproval
+            }
+            if let question = decoded.question {
+                session.pendingQuestion = question
+                session.state = .waitingForInput
+            }
+            if decoded.clearApproval {
+                session.pendingApproval = nil
+                if session.state == .waitingForApproval {
+                    session.state = decoded.state ?? .running
+                }
+            }
+            if decoded.clearQuestion {
+                session.pendingQuestion = nil
+                if session.state == .waitingForInput {
+                    session.state = decoded.state ?? .running
+                }
             }
         }
-        if decoded.clearQuestion {
-            session.pendingQuestion = nil
-            if session.state == .waitingForInput {
-                session.state = decoded.state ?? .running
-            }
-        }
+
         if let jump = decoded.jumpBack {
             var merged = session.jumpBack ?? JumpBackContext()
             if let cwd = jump.workingDirectory { merged.workingDirectory = cwd }
@@ -244,7 +261,10 @@ public actor SessionStore {
         }
 
         session.lastEventType = envelope.eventType
-        session.updatedAt = envelope.timestamp
+        // Never move updatedAt backwards.
+        if envelope.timestamp >= session.updatedAt {
+            session.updatedAt = envelope.timestamp
+        }
         session.recentEventIDs.append(envelope.id)
         if session.recentEventIDs.count > recentEventLimit {
             session.recentEventIDs.removeFirst(session.recentEventIDs.count - recentEventLimit)
@@ -255,14 +275,19 @@ public actor SessionStore {
     }
 
     /// Apply a local user response (approval / answer) and optionally clear pending prompts.
+    ///
+    /// **ID match required:** mismatched `requestId` / `promptId` is a no-op (does not
+    /// force the session to `.running` or clear a different pending prompt).
     @discardableResult
     public func applyLocalResponse(_ response: AgentResponse) async -> Session? {
         switch response {
         case .approval(let decision):
             guard var session = sessionsByID[decision.sessionId] else { return nil }
-            if session.pendingApproval?.id == decision.requestId {
-                session.pendingApproval = nil
+            guard session.pendingApproval?.id == decision.requestId else {
+                // Mismatched id — leave state untouched.
+                return session
             }
+            session.pendingApproval = nil
             session.state = .running
             session.summary = decision.approved ? "Approved" : "Denied"
             session.updatedAt = decision.decidedAt
@@ -270,9 +295,10 @@ public actor SessionStore {
             return session
         case .question(let answer):
             guard var session = sessionsByID[answer.sessionId] else { return nil }
-            if session.pendingQuestion?.id == answer.promptId {
-                session.pendingQuestion = nil
+            guard session.pendingQuestion?.id == answer.promptId else {
+                return session
             }
+            session.pendingQuestion = nil
             session.state = .running
             session.summary = "Answered"
             session.updatedAt = answer.answeredAt
@@ -294,14 +320,25 @@ public actor SessionStore {
         bumpAndPublish()
     }
 
+    /// Replace all sessions. Duplicate ids are resolved **last-wins** without trapping.
     public func replaceAll(_ sessions: [Session]) async {
-        sessionsByID = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0) })
-        order = sessions.map(\.id)
+        var map: [SessionID: Session] = [:]
+        var seenOrder: [SessionID] = []
+        for session in sessions {
+            let isNew = map[session.id] == nil
+            map[session.id] = session
+            if isNew {
+                seenOrder.append(session.id)
+            }
+            // Last-wins: keep first-seen order position; value is the last occurrence.
+        }
+        sessionsByID = map
+        order = seenOrder
         pruneToPolicy(now: Date())
         if let persistence, policy.autoPersist {
             // Best-effort full rewrite: delete missing, save current.
             if let existing = try? await persistence.loadAll() {
-                let keep = Set(sessions.map(\.id))
+                let keep = Set(map.keys)
                 for old in existing where !keep.contains(old.id) {
                     try? await persistence.delete(id: old.id)
                 }

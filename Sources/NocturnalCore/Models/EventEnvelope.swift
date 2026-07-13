@@ -24,7 +24,9 @@ public struct EventEnvelope: Codable, Sendable, Hashable, Identifiable {
     public var payload: [String: JSONValue]
     /// Original upstream JSON object (or wrapper), preserved for unknown events.
     public var raw: [String: JSONValue]
-    /// Optional original source string when ``source`` is ``AgentSource/unknown``.
+    /// Optional original source string when ``source`` is ``AgentSource/unknown``,
+    /// or any explicit `sourceRaw` supplied on the wire. Always preserved across
+    /// encode/decode hops when present.
     public var sourceRaw: String?
 
     public init(
@@ -77,12 +79,23 @@ public struct EventEnvelope: Codable, Sendable, Hashable, Identifiable {
         schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion)
             ?? EventEnvelope.currentSchemaVersion
 
+        let explicitSourceRaw = try container.decodeIfPresent(String.self, forKey: .sourceRaw)
+
         if let sourceString = try? container.decode(String.self, forKey: .source) {
             source = AgentSource(parsing: sourceString)
-            sourceRaw = source == .unknown ? sourceString : try container.decodeIfPresent(String.self, forKey: .sourceRaw)
+            // Always preserve an explicit sourceRaw field. When source is unknown
+            // and sourceRaw was omitted, fall back to the raw source string so the
+            // original label survives encode/decode hops.
+            if let explicitSourceRaw {
+                sourceRaw = explicitSourceRaw
+            } else if source == .unknown {
+                sourceRaw = sourceString
+            } else {
+                sourceRaw = nil
+            }
         } else {
             source = try container.decodeIfPresent(AgentSource.self, forKey: .source) ?? .unknown
-            sourceRaw = try container.decodeIfPresent(String.self, forKey: .sourceRaw)
+            sourceRaw = explicitSourceRaw
         }
 
         eventType = try container.decodeIfPresent(String.self, forKey: .eventType) ?? "unknown"
@@ -92,6 +105,10 @@ public struct EventEnvelope: Codable, Sendable, Hashable, Identifiable {
             timestamp = date
         } else if let string = try? container.decode(String.self, forKey: .timestamp),
                   let date = EventEnvelopeDateParsing.parse(string)
+        {
+            timestamp = date
+        } else if let number = try? container.decode(Double.self, forKey: .timestamp),
+                  let date = EventEnvelopeDateParsing.parseEpoch(number)
         {
             timestamp = date
         } else {
@@ -130,6 +147,15 @@ enum EventEnvelopeDateParsing {
         return basic.date(from: string)
     }
 
+    /// Epoch seconds or milliseconds (heuristic: values ≥ 1e12 are ms).
+    static func parseEpoch(_ number: Double) -> Date? {
+        guard number.isFinite else { return nil }
+        if number > 1_000_000_000_000 {
+            return Date(timeIntervalSince1970: number / 1000)
+        }
+        return Date(timeIntervalSince1970: number)
+    }
+
     /// Safe `JSONDecoder.dateDecodingStrategy` implementation.
     ///
     /// **Never** call `container.decode(Date.self)` inside a custom date strategy —
@@ -146,11 +172,13 @@ enum EventEnvelopeDateParsing {
             )
         }
         if let number = try? container.decode(Double.self) {
-            // Heuristic: ms vs s timestamps
-            if number > 1_000_000_000_000 {
-                return Date(timeIntervalSince1970: number / 1000)
+            if let date = parseEpoch(number) {
+                return date
             }
-            return Date(timeIntervalSince1970: number)
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Invalid epoch timestamp: \(number)"
+            )
         }
         throw DecodingError.dataCorruptedError(
             in: container,
@@ -208,17 +236,53 @@ public enum JSONValue: Codable, Sendable, Hashable {
         }
     }
 
+    /// String projection. Integer-valued numbers use an **exact** conversion —
+    /// never a truncating `Int(double)` that can trap or misrepresent large values.
     public var stringValue: String? {
         switch self {
         case .string(let value): return value
         case .number(let value):
-            if value.rounded() == value, value >= Double(Int.min), value <= Double(Int.max) {
-                return String(Int(value))
+            guard value.isFinite else { return nil }
+            if let exact = Self.exactIntegerString(value) {
+                return exact
             }
             return String(value)
         case .bool(let value): return value ? "true" : "false"
         default: return nil
         }
+    }
+
+    /// Convert a Double to a decimal integer string only when it is an exact
+    /// integer in the inclusive `Int64` range (safe for `pid` / id display).
+    /// Returns `nil` for non-integers, NaN/Inf, or out-of-range values.
+    public static func exactIntegerString(_ value: Double) -> String? {
+        guard value.isFinite else { return nil }
+        // Must be integral (no fractional part).
+        guard value.rounded(.towardZero) == value else { return nil }
+        // Bound to Int64 before converting — avoids Int trap on 32-bit and
+        // avoids imprecise Double→Int for values near Int.max.
+        let asInt64 = Int64(exactly: value)
+        if let asInt64 {
+            return String(asInt64)
+        }
+        // Integers outside Int64 but still exact in Double (rare): format without
+        // scientific notation via truncating remainder check already done.
+        // Fall back to fixed formatting only for whole numbers.
+        return String(format: "%.0f", value)
+    }
+
+    /// Failable exact integer conversion (no trap on out-of-range doubles).
+    public var exactIntValue: Int? {
+        guard case .number(let value) = self, value.isFinite else { return nil }
+        guard value.rounded(.towardZero) == value else { return nil }
+        return Int(exactly: value)
+    }
+
+    /// Failable exact Int32 conversion for PIDs and similar OS fields.
+    public var exactInt32Value: Int32? {
+        guard case .number(let value) = self, value.isFinite else { return nil }
+        guard value.rounded(.towardZero) == value else { return nil }
+        return Int32(exactly: value)
     }
 
     public var boolValue: Bool? {

@@ -201,4 +201,405 @@ struct PersistenceTests {
         let paths2 = try PersistencePaths.testing(temporaryDirectory: temp, socketURL: custom)
         #expect(paths2.socketURL.path == custom.path)
     }
+
+    // MARK: - deleteAll
+
+    @Test func deleteAllRemovesMalformedAndReadableFiles() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-delete-all")
+        defer { cleanup() }
+
+        let paths = try TestSupport.makePaths(in: temp)
+        let persistence = SessionPersistence(paths: paths, quarantineCorrupt: false)
+
+        try await persistence.save(Session(
+            id: SessionID("good"),
+            source: .codex,
+            state: .idle,
+            title: "Good"
+        ))
+        // Malformed JSON that loadAll would skip.
+        let bad = paths.sessionsDirectory.appendingPathComponent("garbage.json")
+        try Data("{not-json".utf8).write(to: bad)
+        // Non-json noise file.
+        let noise = paths.sessionsDirectory.appendingPathComponent("readme.txt")
+        try Data("hi".utf8).write(to: noise)
+        // Nested directory must survive (metadata safety).
+        let nested = paths.sessionsDirectory.appendingPathComponent("subdir", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: nested.appendingPathComponent("keep.txt"))
+
+        try await persistence.deleteAll()
+
+        let remaining = try FileManager.default.contentsOfDirectory(
+            at: paths.sessionsDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: []
+        )
+        #expect(remaining.allSatisfy { url in
+            var isDir: ObjCBool = false
+            FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+            return isDir.boolValue
+        })
+        #expect(FileManager.default.fileExists(atPath: nested.appendingPathComponent("keep.txt").path))
+        #expect(try await persistence.loadAll().isEmpty)
+    }
+
+    // MARK: - Path encoding collisions
+
+    @Test func pathEncodingSeparatesSlashAndUnderscoreIds() {
+        let aSlashB = PathComponentEncoding.encode("a/b")
+        let aUnderB = PathComponentEncoding.encode("a_b")
+        #expect(aSlashB != aUnderB)
+        #expect(aSlashB == "a%2Fb")
+        #expect(aUnderB == "a%5Fb" || aUnderB == "a_b") // `_` is not unreserved → percent
+        #expect(PathComponentEncoding.decode(aSlashB) == "a/b")
+        #expect(PathComponentEncoding.decode(aUnderB) == "a_b")
+    }
+
+    @Test func pathEncodingSeparatesColonCases() {
+        let colon = PathComponentEncoding.encode("a:b")
+        let under = PathComponentEncoding.encode("a_b")
+        let legacyColon = PathComponentEncoding.legacySanitize("a:b")
+        #expect(colon != under)
+        #expect(colon == "a%3Ab")
+        // Legacy collides — documenting why encoding is required.
+        #expect(legacyColon == PathComponentEncoding.legacySanitize("a_b")
+            || legacyColon == "a_b")
+        #expect(legacyColon == "a_b")
+    }
+
+    @Test func sessionFilesDoNotCollideForAmbiguousIds() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-path-coll")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+
+        let slash = paths.sessionFile(for: SessionID("a/b"))
+        let under = paths.sessionFile(for: SessionID("a_b"))
+        let colon = paths.sessionFile(for: SessionID("a:b"))
+        #expect(slash.path != under.path)
+        #expect(colon.path != under.path)
+        #expect(Set([slash.path, under.path, colon.path]).count == 3)
+    }
+
+    @Test func loadPrefersCanonicalAndFallsBackToLegacy() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-legacy-sess")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+        let persistence = SessionPersistence(paths: paths)
+
+        // Write using legacy filename for id with colon (old sanitize).
+        let id = SessionID("proj:main")
+        let session = Session(id: id, source: .codex, state: .running, title: "Legacy")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(session)
+        try data.write(to: paths.legacySessionFile(for: id), options: [.atomic])
+
+        let loaded = try await persistence.load(id: id)
+        #expect(loaded?.title == "Legacy")
+        #expect(loaded?.id == id)
+
+        // Matching legacy load migrates onto the canonical path.
+        let canonical = paths.sessionFile(for: id)
+        let legacy = paths.legacySessionFile(for: id)
+        #expect(FileManager.default.fileExists(atPath: canonical.path))
+        #expect(FileManager.default.fileExists(atPath: legacy.path) == false)
+    }
+
+    // MARK: - Legacy filename collision (a/b vs a_b → a_b.json)
+
+    /// Shared legacy name for both IDs under the pre-encoding sanitize.
+    private static let ambiguousLegacyName = "a_b.json"
+
+    /// Plant a legacy `a_b.json` whose embedded session id is `a/b`.
+    private func plantLegacySlashSession(
+        paths: PersistencePaths,
+        title: String = "Slash owner"
+    ) throws -> (Session, URL) {
+        let slashID = SessionID("a/b")
+        let session = Session(
+            id: slashID,
+            source: .codex,
+            state: .running,
+            title: title
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(session)
+        // Both a/b and a_b legacy-sanitize to a_b.json.
+        let legacyURL = paths.legacySessionFile(for: slashID)
+        #expect(legacyURL.lastPathComponent == Self.ambiguousLegacyName)
+        #expect(paths.legacySessionFile(for: SessionID("a_b")).path == legacyURL.path)
+        try data.write(to: legacyURL, options: [.atomic])
+        return (session, legacyURL)
+    }
+
+    @Test func loadUnderscoreIdDoesNotClaimForeignLegacySlashFile() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-leg-claim")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+        let persistence = SessionPersistence(paths: paths)
+
+        let (slashSession, legacyURL) = try plantLegacySlashSession(paths: paths)
+        let before = try Data(contentsOf: legacyURL)
+
+        // load(a_b) must not return, migrate, or rewrite the a/b file.
+        let underID = SessionID("a_b")
+        let loaded = try await persistence.load(id: underID)
+        #expect(loaded == nil)
+
+        #expect(FileManager.default.fileExists(atPath: legacyURL.path))
+        let after = try Data(contentsOf: legacyURL)
+        #expect(after == before)
+
+        // Canonical path for a_b must not appear (no false migration).
+        let underCanonical = paths.sessionFile(for: underID)
+        #expect(FileManager.default.fileExists(atPath: underCanonical.path) == false)
+
+        // Canonical path for a/b must also remain absent until load(a/b).
+        let slashCanonical = paths.sessionFile(for: slashSession.id)
+        #expect(FileManager.default.fileExists(atPath: slashCanonical.path) == false)
+    }
+
+    @Test func deleteUnderscoreIdDoesNotRemoveForeignLegacySlashFile() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-leg-del")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+        let persistence = SessionPersistence(paths: paths)
+
+        let (_, legacyURL) = try plantLegacySlashSession(paths: paths, title: "Keep me")
+        let before = try Data(contentsOf: legacyURL)
+
+        try await persistence.delete(id: SessionID("a_b"))
+
+        #expect(FileManager.default.fileExists(atPath: legacyURL.path))
+        let after = try Data(contentsOf: legacyURL)
+        #expect(after == before)
+
+        // Owner can still load via a/b.
+        let owned = try await persistence.load(id: SessionID("a/b"))
+        #expect(owned?.title == "Keep me")
+        #expect(owned?.id == SessionID("a/b"))
+    }
+
+    @Test func loadSlashIdMigratesMatchingLegacyFile() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-leg-mig")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+        let persistence = SessionPersistence(paths: paths)
+
+        let (slashSession, legacyURL) = try plantLegacySlashSession(paths: paths, title: "Migrate me")
+        let slashID = slashSession.id
+
+        let loaded = try await persistence.load(id: slashID)
+        #expect(loaded?.id == slashID)
+        #expect(loaded?.title == "Migrate me")
+
+        let canonical = paths.sessionFile(for: slashID)
+        #expect(FileManager.default.fileExists(atPath: canonical.path))
+        #expect(FileManager.default.fileExists(atPath: legacyURL.path) == false)
+
+        // Re-load from canonical; underscore id still sees nothing of this file.
+        let again = try await persistence.load(id: slashID)
+        #expect(again?.title == "Migrate me")
+        #expect(try await persistence.load(id: SessionID("a_b")) == nil)
+    }
+
+    @Test func saveUnderscoreIdDoesNotDropForeignLegacySlashFile() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-leg-save")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+        let persistence = SessionPersistence(paths: paths)
+
+        let (_, legacyURL) = try plantLegacySlashSession(paths: paths, title: "Foreign")
+        let before = try Data(contentsOf: legacyURL)
+
+        let under = Session(
+            id: SessionID("a_b"),
+            source: .claude,
+            state: .idle,
+            title: "Underscore"
+        )
+        try await persistence.save(under)
+
+        // Canonical for a_b exists; foreign legacy a_b.json untouched.
+        #expect(FileManager.default.fileExists(atPath: paths.sessionFile(for: under.id).path))
+        #expect(FileManager.default.fileExists(atPath: legacyURL.path))
+        #expect(try Data(contentsOf: legacyURL) == before)
+
+        let foreign = try await persistence.load(id: SessionID("a/b"))
+        #expect(foreign?.title == "Foreign")
+        let own = try await persistence.load(id: SessionID("a_b"))
+        #expect(own?.title == "Underscore")
+    }
+
+    @Test func deleteSlashIdConsumesMatchingLegacyFile() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-leg-del-ok")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+        let persistence = SessionPersistence(paths: paths)
+
+        let (_, legacyURL) = try plantLegacySlashSession(paths: paths)
+        try await persistence.delete(id: SessionID("a/b"))
+        #expect(FileManager.default.fileExists(atPath: legacyURL.path) == false)
+        #expect(try await persistence.load(id: SessionID("a/b")) == nil)
+    }
+
+    @Test func canonicalSaveAndLoadStillWorksAlongsideLegacySafety() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-can-ok")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+        let persistence = SessionPersistence(paths: paths)
+
+        let slash = Session(id: SessionID("a/b"), source: .codex, state: .running, title: "Slash")
+        let under = Session(id: SessionID("a_b"), source: .claude, state: .idle, title: "Under")
+        try await persistence.save(slash)
+        try await persistence.save(under)
+
+        #expect(paths.sessionFile(for: slash.id).path != paths.sessionFile(for: under.id).path)
+        #expect(try await persistence.load(id: slash.id)?.title == "Slash")
+        #expect(try await persistence.load(id: under.id)?.title == "Under")
+
+        try await persistence.delete(id: under.id)
+        #expect(try await persistence.load(id: under.id) == nil)
+        #expect(try await persistence.load(id: slash.id)?.title == "Slash")
+    }
+
+    // MARK: - AppSettings schema protection
+
+    @Test func settingsNeverDowngradeSchema99() throws {
+        let json = Data(
+            #"""
+            {
+              "schemaVersion": 99,
+              "reduceMotion": true,
+              "soundEnabled": true,
+              "showFloatingPill": false,
+              "maxVisibleSessions": 3,
+              "futureOnlyKey": "keep-me"
+            }
+            """#.utf8
+        )
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: json)
+        #expect(decoded.schemaVersion == 99)
+        #expect(decoded.reduceMotion)
+        #expect(decoded.maxVisibleSessions == 3)
+    }
+
+    @Test func settingsLoadDoesNotRewriteNewerSchemaFile() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-settings-99")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+
+        let original = Data(
+            #"""
+            {
+              "schemaVersion": 99,
+              "reduceMotion": true,
+              "soundEnabled": false,
+              "showFloatingPill": true,
+              "maxVisibleSessions": 4,
+              "futureOnlyKey": "preserved"
+            }
+            """#.utf8
+        )
+        try original.write(to: paths.settingsFile, options: [.atomic])
+
+        let store = SettingsStore(paths: paths)
+        let loaded = try await store.load()
+        #expect(loaded.schemaVersion == 99)
+
+        // On-disk bytes must be unchanged after load (no save-on-load rewrite).
+        let after = try Data(contentsOf: paths.settingsFile)
+        #expect(after == original)
+        let object = try JSONSerialization.jsonObject(with: after) as? [String: Any]
+        #expect(object?["futureOnlyKey"] as? String == "preserved")
+        #expect(object?["schemaVersion"] as? Int == 99)
+    }
+
+    @Test func settingsSaveRefusesToOverwriteNewerSchema() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-settings-refuse")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+
+        let original = Data(
+            #"{"schemaVersion":99,"reduceMotion":false,"soundEnabled":false,"showFloatingPill":true,"maxVisibleSessions":12,"futureOnlyKey":"x"}"#.utf8
+        )
+        try original.write(to: paths.settingsFile, options: [.atomic])
+
+        let store = SettingsStore(paths: paths)
+        var threw = false
+        do {
+            try await store.save(AppSettings.default)
+        } catch let error as SettingsStoreError {
+            threw = true
+            guard case .newerSchemaOnDisk(let onDisk, let supported) = error else {
+                Issue.record("unexpected SettingsStoreError \(error)")
+                return
+            }
+            #expect(onDisk == 99)
+            #expect(supported == AppSettings.currentSchemaVersion)
+        }
+        #expect(threw)
+        let after = try Data(contentsOf: paths.settingsFile)
+        #expect(after == original)
+    }
+
+    // MARK: - SocketPaths matrix
+
+    @Test func socketPathsPrecedenceExplicitOverEnv() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-sock-prec")
+        defer { cleanup() }
+        let short = try SocketPaths.makeShortTestingRoot(prefix: "nsp")
+        defer { try? FileManager.default.removeItem(at: short) }
+
+        let explicit = SocketPaths.testingSocketPath(in: short, name: "explicit.sock")
+        let envSock = SocketPaths.testingSocketPath(in: short, name: "env.sock")
+        let appSupport = temp.appendingPathComponent("as", isDirectory: true)
+
+        let env: [String: String] = [
+            NocturnalEnvironmentKey.socket.rawValue: envSock.path,
+            NocturnalEnvironmentKey.appSupport.rawValue: appSupport.path,
+        ]
+        let paths = try SocketPaths.resolve(
+            environment: env,
+            explicitSocketPath: explicit.path
+        )
+        #expect(paths.socketURL.path == explicit.path)
+        #expect(paths.applicationSupportDirectory.path == appSupport.path)
+    }
+
+    @Test func socketPathsHonorsAppSupportEnv() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-sock-as")
+        defer { cleanup() }
+        let appSupport = temp.appendingPathComponent("custom-support", isDirectory: true)
+        let env: [String: String] = [
+            NocturnalEnvironmentKey.appSupport.rawValue: appSupport.path,
+        ]
+        let paths = try SocketPaths.resolve(environment: env)
+        #expect(paths.applicationSupportDirectory.path == appSupport.path)
+        #expect(paths.socketURL.path == appSupport.appendingPathComponent("ipc.sock").path)
+        #expect(FileManager.default.fileExists(atPath: appSupport.path))
+    }
+
+    @Test func socketPathsOverrideDoesNotCreateAppSupport() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-sock-noside")
+        defer { cleanup() }
+        let short = try SocketPaths.makeShortTestingRoot(prefix: "nso")
+        defer { try? FileManager.default.removeItem(at: short) }
+
+        let socket = SocketPaths.testingSocketPath(in: short, name: "only.sock")
+        // Point app support at a path that must NOT be created when socket is overridden.
+        let appSupport = temp.appendingPathComponent("must-not-exist-\(UUID().uuidString)", isDirectory: true)
+        #expect(FileManager.default.fileExists(atPath: appSupport.path) == false)
+
+        let env: [String: String] = [
+            NocturnalEnvironmentKey.appSupport.rawValue: appSupport.path,
+            NocturnalEnvironmentKey.socket.rawValue: socket.path,
+        ]
+        let paths = try SocketPaths.resolve(environment: env)
+        #expect(paths.socketURL.path == socket.path)
+        #expect(paths.applicationSupportDirectory.path == appSupport.path)
+        #expect(FileManager.default.fileExists(atPath: appSupport.path) == false)
+    }
 }

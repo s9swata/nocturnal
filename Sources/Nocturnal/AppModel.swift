@@ -73,11 +73,6 @@ final class AppModel {
         return snapshot.sessions.first { $0.id == questionSheetSessionID }
     }
 
-    /// Canonical setup command shown in empty state / settings.
-    var setupInstallCommand: String {
-        "nocturnal-setup install --product all"
-    }
-
     /// Path to bundled `nocturnal-setup` when packaged; otherwise bare command name.
     var setupBinaryDisplayPath: String {
         if let url = Bundle.main.url(
@@ -94,7 +89,19 @@ final class AppModel {
         {
             return url.path
         }
-        return "nocturnal-setup"
+        return SetupCommandFormatting.bareBinaryName
+    }
+
+    /// Canonical setup command shown in empty state / settings.
+    /// Packaged helper paths are shell-quoted so spaces remain executable.
+    var setupInstallCommand: String {
+        SetupCommandFormatting.installAllCommand(binaryPath: setupBinaryDisplayPath)
+    }
+
+    /// True once bootstrap resolved Application Support (not the `"—"` placeholder).
+    var canRevealAppSupport: Bool {
+        persistencePaths != nil
+            && SetupCommandFormatting.isAvailablePathDisplay(appSupportPathDisplay)
     }
 
     init() {
@@ -159,7 +166,9 @@ final class AppModel {
 
     // MARK: - Session actions
 
-    func approve(_ request: ApprovalRequest, approved: Bool) async {
+    /// Submit an approval decision. Returns `true` only after a successful local record.
+    @discardableResult
+    func approve(_ request: ApprovalRequest, approved: Bool) async -> Bool {
         let decision = ApprovalDecision(
             requestId: request.id,
             sessionId: request.sessionId,
@@ -173,16 +182,20 @@ final class AppModel {
             if approvalSheetSessionID == request.sessionId {
                 approvalSheetSessionID = nil
             }
+            return true
         } catch {
             statusMessage = "Response failed: \(error.localizedDescription)"
+            return false
         }
     }
 
-    func answer(_ prompt: QuestionPrompt, text: String) async {
+    /// Submit a freeform / choice answer. Returns `true` only after a successful local record.
+    @discardableResult
+    func answer(_ prompt: QuestionPrompt, text: String) async -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             statusMessage = "Answer cannot be empty"
-            return
+            return false
         }
         let answer = QuestionAnswer(
             promptId: prompt.id,
@@ -197,8 +210,10 @@ final class AppModel {
             if questionSheetSessionID == prompt.sessionId {
                 questionSheetSessionID = nil
             }
+            return true
         } catch {
             statusMessage = "Answer failed: \(error.localizedDescription)"
+            return false
         }
     }
 
@@ -209,6 +224,8 @@ final class AppModel {
     }
 
     func updateSettings(_ mutate: (inout AppSettings) -> Void) async {
+        // Ignore edits until bootstrap finishes so a late load cannot overwrite them.
+        guard isBootstrapped, settingsStore != nil else { return }
         let previousPill = settings.showFloatingPill
         mutate(&settings)
         try? await settingsStore?.save(settings)
@@ -272,7 +289,11 @@ final class AppModel {
     }
 
     func revealAppSupport() {
-        revealInFinder(appSupportPathDisplay)
+        guard canRevealAppSupport, let paths = persistencePaths else {
+            noteStatus("App Support path unavailable")
+            return
+        }
+        revealInFinder(paths.root.path)
     }
 
     func revealSetupHelper() {

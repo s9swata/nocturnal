@@ -15,10 +15,19 @@ struct SetupMain {
         }
 
         let action = args[0]
-        let products = parseProducts(from: args)
-        let forwarder = resolveForwarderPath(from: args)
-        let dryRun = args.contains("--dry-run")
-        let mode = parseMode(from: args)
+        let options: SetupCLIOptions
+        do {
+            options = try SetupCLIOptions.parse(arguments: args)
+        } catch {
+            fputs("nocturnal-setup: \(error)\n", stderr)
+            printUsage()
+            exit(2)
+        }
+
+        let forwarder = options.forwarderPath ?? resolveForwarderPath()
+        let dryRun = options.dryRun
+        let mode = options.mode
+        let products = options.products
 
         do {
             let installer = try HookInstaller.resolve(
@@ -76,6 +85,8 @@ struct SetupMain {
 
             Notes:
               • Install is idempotent and creates timestamped backups.
+              • --product / --forwarder without a value is a usage error (never silent default).
+              • Omitting --product installs for all products; omitting --forwarder auto-discovers.
               • Default mode writes only Nocturnal-managed sidecar files:
                   $CONFIG_ROOT/.codex/nocturnal-hooks.json
                   $CONFIG_ROOT/.claude/nocturnal-hooks.json
@@ -84,47 +95,13 @@ struct SetupMain {
                   Claude → .claude/settings.json (hooks key)
               • Native formats evolve; merge is best-effort. Prefer sidecar for safety.
               • Does not rewrite arbitrary user config without backup.
+              • Socket and binary paths in generated commands are shell-quoted (spaces safe).
             """
         )
     }
 
-    private static func parseProducts(from args: [String]) -> [HookProduct] {
-        if let idx = args.firstIndex(of: "--product"), args.index(after: idx) < args.endIndex {
-            let raw = args[args.index(after: idx)].lowercased()
-            switch raw {
-            case "all":
-                return HookProduct.allCases
-            case "codex":
-                return [.codex]
-            case "claude":
-                return [.claude]
-            default:
-                fputs("Unknown product: \(raw)\n", stderr)
-                exit(2)
-            }
-        }
-        return HookProduct.allCases
-    }
-
-    private static func parseMode(from args: [String]) -> HookInstallMode {
-        guard let idx = args.firstIndex(of: "--mode"), args.index(after: idx) < args.endIndex else {
-            return .sidecar
-        }
-        switch args[args.index(after: idx)].lowercased() {
-        case "sidecar":
-            return .sidecar
-        case "merge-native", "merge", "native":
-            return .mergeNative
-        default:
-            fputs("Unknown mode; using sidecar\n", stderr)
-            return .sidecar
-        }
-    }
-
-    private static func resolveForwarderPath(from args: [String]) -> URL {
-        if let idx = args.firstIndex(of: "--forwarder"), args.index(after: idx) < args.endIndex {
-            return URL(fileURLWithPath: args[args.index(after: idx)])
-        }
+    /// Auto-discover forwarder when `--forwarder` is omitted (not when value is missing).
+    private static func resolveForwarderPath() -> URL {
         // Prefer sibling binary next to this executable.
         let exec = URL(fileURLWithPath: CommandLine.arguments[0])
         let sibling = exec.deletingLastPathComponent()
