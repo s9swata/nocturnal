@@ -244,6 +244,87 @@ struct PersistenceTests {
         #expect(try await persistence.loadAll().isEmpty)
     }
 
+    @Test func deleteAllSkipsSymlinksFifosAndSockets() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-delete-special")
+        defer { cleanup() }
+
+        let paths = try TestSupport.makePaths(in: temp)
+        let persistence = SessionPersistence(paths: paths)
+
+        try await persistence.save(Session(
+            id: SessionID("regular"),
+            source: .codex,
+            state: .idle,
+            title: "Regular"
+        ))
+
+        let sessionsDir = paths.sessionsDirectory
+        let target = temp.appendingPathComponent("symlink-target.txt")
+        try Data("target".utf8).write(to: target)
+        let symlink = sessionsDir.appendingPathComponent("link.json")
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: target)
+
+        // FIFO (named pipe) — must not be unlinked by deleteAll.
+        let fifoPath = sessionsDir.appendingPathComponent("pipe.fifo").path
+        let fifoOK = mkfifo(fifoPath, 0o644) == 0
+        #expect(fifoOK)
+
+        try await persistence.deleteAll()
+
+        #expect(FileManager.default.fileExists(atPath: symlink.path))
+        #expect(FileManager.default.fileExists(atPath: fifoPath))
+        #expect(try await persistence.loadAll().isEmpty)
+
+        // Cleanup special nodes left behind on purpose.
+        try? FileManager.default.removeItem(at: symlink)
+        unlink(fifoPath)
+    }
+
+    @Test func loadMigratesPriorEncodedFileAfterEmbeddedIdCheck() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-prior-mig")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+        let persistence = SessionPersistence(paths: paths)
+
+        let id = SessionID("Case/Id")
+        let session = Session(id: id, source: .codex, state: .running, title: "Prior")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(session)
+        let prior = paths.priorEncodedSessionFile(for: id)
+        try data.write(to: prior, options: [.atomic])
+        #expect(prior.lastPathComponent == "Case%2FId.json")
+
+        let loaded = try await persistence.load(id: id)
+        #expect(loaded?.title == "Prior")
+        #expect(FileManager.default.fileExists(atPath: paths.sessionFile(for: id).path))
+        #expect(FileManager.default.fileExists(atPath: prior.path) == false)
+        // Canonical lives under records/.
+        #expect(paths.sessionFile(for: id).path.contains("/\(PathComponentEncoding.recordsDirectoryName)/"))
+    }
+
+    @Test func loadMigratesPriorNPrefixedFlatFileAfterEmbeddedIdCheck() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-nprefix-mig")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+        let persistence = SessionPersistence(paths: paths)
+
+        let id = SessionID("foo")
+        let session = Session(id: id, source: .codex, state: .running, title: "NPrefix")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(session)
+        let priorPrefixed = paths.priorPrefixedSessionFile(for: id)
+        try data.write(to: priorPrefixed, options: [.atomic])
+        #expect(priorPrefixed.lastPathComponent == "n.foo.json")
+        #expect(priorPrefixed.path.contains("/\(PathComponentEncoding.recordsDirectoryName)/") == false)
+
+        let loaded = try await persistence.load(id: id)
+        #expect(loaded?.title == "NPrefix")
+        #expect(FileManager.default.fileExists(atPath: paths.sessionFile(for: id).path))
+        #expect(FileManager.default.fileExists(atPath: priorPrefixed.path) == false)
+    }
+
     // MARK: - Path encoding collisions
 
     @Test func pathEncodingSeparatesSlashAndUnderscoreIds() {
@@ -251,7 +332,7 @@ struct PersistenceTests {
         let aUnderB = PathComponentEncoding.encode("a_b")
         #expect(aSlashB != aUnderB)
         #expect(aSlashB == "a%2Fb")
-        #expect(aUnderB == "a%5Fb" || aUnderB == "a_b") // `_` is not unreserved → percent
+        #expect(aUnderB == "a%5Fb") // `_` is not unreserved → percent
         #expect(PathComponentEncoding.decode(aSlashB) == "a/b")
         #expect(PathComponentEncoding.decode(aUnderB) == "a_b")
     }
@@ -266,6 +347,163 @@ struct PersistenceTests {
         #expect(legacyColon == PathComponentEncoding.legacySanitize("a_b")
             || legacyColon == "a_b")
         #expect(legacyColon == "a_b")
+    }
+
+    @Test func pathEncodingIsCaseStableAndDisjointFromLegacy() {
+        let upper = PathComponentEncoding.encode("Hello")
+        let lower = PathComponentEncoding.encode("hello")
+        #expect(upper != lower)
+        // Uppercase letter must be percent-encoded (case-stable on APFS).
+        #expect(upper.contains("%48")) // 'H'
+        #expect(lower == "hello")
+
+        // Canonical body never equals legacy sanitize when case differs.
+        #expect(upper != PathComponentEncoding.legacySanitize("Hello"))
+        #expect(lower == PathComponentEncoding.legacySanitize("hello"))
+
+        // Literal percent id is distinct from slash id's body.
+        // Uppercase hex letters in the literal id are case-stable-encoded too (`F` → `%46`).
+        let literalPercent = PathComponentEncoding.encode("a%2Fb")
+        let slash = PathComponentEncoding.encode("a/b")
+        #expect(literalPercent != slash)
+        #expect(literalPercent == "a%252%46b")
+        #expect(PathComponentEncoding.decode(literalPercent) == "a%2Fb")
+        #expect(PathComponentEncoding.decode(slash) == "a/b")
+        #expect(PathComponentEncoding.encode("n.foo") == "n.foo")
+        #expect(PathComponentEncoding.decode("n.foo") == "n.foo")
+    }
+
+    /// Regression: flat `n.` prefix was NOT disjoint — id `foo` → `n.foo.json`
+    /// collided with legacy literal id `n.foo`. Subdirectory namespace fixes this.
+    @Test func canonicalFooIsDisjointFromLiteralNDotFoo() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-n-dot-coll")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+
+        let foo = SessionID("foo")
+        let nFoo = SessionID("n.foo")
+        let fooCanonical = paths.sessionFile(for: foo)
+        let nFooCanonical = paths.sessionFile(for: nFoo)
+        let fooPriorPrefixed = paths.priorPrefixedSessionFile(for: foo)
+        let nFooLegacy = paths.legacySessionFile(for: nFoo)
+
+        // Old flat layout collision that must no longer be the write target.
+        #expect(fooPriorPrefixed.lastPathComponent == "n.foo.json")
+        #expect(nFooLegacy.lastPathComponent == "n.foo.json")
+        #expect(fooPriorPrefixed.path == nFooLegacy.path)
+
+        // Canonical writes are under records/ and use body-only names.
+        #expect(fooCanonical.path.contains("/\(PathComponentEncoding.recordsDirectoryName)/"))
+        #expect(nFooCanonical.path.contains("/\(PathComponentEncoding.recordsDirectoryName)/"))
+        #expect(fooCanonical.lastPathComponent == "foo.json")
+        #expect(nFooCanonical.lastPathComponent == "n.foo.json")
+        #expect(fooCanonical.path != nFooCanonical.path)
+        #expect(fooCanonical.path != fooPriorPrefixed.path)
+        #expect(nFooCanonical.path != nFooLegacy.path)
+    }
+
+    /// Literal `a%2Fb` vs slash id `a/b` must never share a **canonical write** path.
+    /// Flat prior/legacy candidates may still overlap (e.g. `a%2Fb.json`); ownership
+    /// is always verified via embedded session id before migrate/delete.
+    @Test func slashIdIsDisjointFromLiteralPercentEncodedId() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-pct-coll")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+        let persistence = SessionPersistence(paths: paths)
+
+        let slash = SessionID("a/b")
+        let literal = SessionID("a%2Fb")
+        let slashCanonical = paths.sessionFile(for: slash)
+        let literalCanonical = paths.sessionFile(for: literal)
+        #expect(slashCanonical.path != literalCanonical.path)
+        #expect(slashCanonical.lastPathComponent == "a%2Fb.json")
+        #expect(literalCanonical.lastPathComponent == "a%252%46b.json")
+        #expect(PathComponentEncoding.encode("a/b") == "a%2Fb")
+        #expect(PathComponentEncoding.encode("a%2Fb") == "a%252%46b")
+        // Prior unprefixed keeps uppercase hex letters unreserved.
+        #expect(PathComponentEncoding.encodePrior("a/b") == "a%2Fb")
+        #expect(PathComponentEncoding.encodePrior("a%2Fb") == "a%252Fb")
+
+        // Known flat-candidate overlap (prior slash vs legacy literal) must not
+        // prevent both records from coexisting under records/.
+        let priorSlash = paths.priorEncodedSessionFile(for: slash)
+        let legacyLiteral = paths.legacySessionFile(for: literal)
+        #expect(priorSlash.path == legacyLiteral.path)
+
+        try await persistence.save(Session(id: slash, source: .codex, state: .running, title: "Slash"))
+        try await persistence.save(Session(id: literal, source: .claude, state: .idle, title: "Literal"))
+        #expect(try await persistence.load(id: slash)?.title == "Slash")
+        #expect(try await persistence.load(id: literal)?.title == "Literal")
+        #expect(FileManager.default.fileExists(atPath: slashCanonical.path))
+        #expect(FileManager.default.fileExists(atPath: literalCanonical.path))
+    }
+
+    /// ASCII case variants must remain distinct on case-insensitive volumes.
+    @Test func asciiCaseVariantsRemainDistinctOnCaseInsensitivePaths() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-case-coll")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+
+        let upper = SessionID("Hello")
+        let lower = SessionID("hello")
+        let mixed = SessionID("hElLo")
+        let set = Set([
+            paths.sessionFile(for: upper).path,
+            paths.sessionFile(for: lower).path,
+            paths.sessionFile(for: mixed).path,
+        ])
+        #expect(set.count == 3)
+        #expect(paths.sessionFile(for: upper).lastPathComponent == "%48ello.json")
+        #expect(paths.sessionFile(for: lower).lastPathComponent == "hello.json")
+        #expect(paths.sessionFile(for: mixed).lastPathComponent.contains("%45")) // 'E'
+        #expect(paths.sessionFile(for: mixed).lastPathComponent.contains("%4C")) // 'L'
+    }
+
+    @Test func fooAndNDotFooPersistIndependently() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-foo-nfoo")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+        let persistence = SessionPersistence(paths: paths)
+
+        let foo = Session(id: SessionID("foo"), source: .codex, state: .running, title: "Foo")
+        let nFoo = Session(id: SessionID("n.foo"), source: .claude, state: .idle, title: "NFoo")
+        try await persistence.save(foo)
+        try await persistence.save(nFoo)
+
+        #expect(try await persistence.load(id: foo.id)?.title == "Foo")
+        #expect(try await persistence.load(id: nFoo.id)?.title == "NFoo")
+
+        // Plant a legacy flat n.foo.json owned by n.foo — must not be claimed by foo.
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let legacyNFoo = paths.legacySessionFile(for: nFoo.id)
+        try encoder.encode(nFoo).write(to: legacyNFoo, options: [.atomic])
+        // Also the prior-prefixed path for id foo is the same filename.
+        #expect(paths.priorPrefixedSessionFile(for: foo.id).path == legacyNFoo.path)
+
+        // load(foo) uses records/foo.json; must not migrate/delete foreign n.foo.json.
+        let loadedFoo = try await persistence.load(id: foo.id)
+        #expect(loadedFoo?.title == "Foo")
+        #expect(FileManager.default.fileExists(atPath: legacyNFoo.path))
+        let stillNFoo = try await persistence.load(id: nFoo.id)
+        #expect(stillNFoo?.title == "NFoo")
+    }
+
+    @Test func recordsNamespaceIsWriteTargetPriorLayoutsAreReadOnly() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-prior-ns")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+        let id = SessionID("a/b")
+        let canonical = paths.sessionFile(for: id)
+        let priorPrefixed = paths.priorPrefixedSessionFile(for: id)
+        let prior = paths.priorEncodedSessionFile(for: id)
+        let legacy = paths.legacySessionFile(for: id)
+        #expect(canonical.path.contains("/\(PathComponentEncoding.recordsDirectoryName)/"))
+        #expect(canonical.lastPathComponent == "a%2Fb.json")
+        #expect(priorPrefixed.lastPathComponent == "n.a%2Fb.json")
+        #expect(prior.lastPathComponent == "a%2Fb.json")
+        #expect(legacy.lastPathComponent == "a_b.json")
+        #expect(Set([canonical.path, priorPrefixed.path, prior.path, legacy.path]).count == 4)
     }
 
     @Test func sessionFilesDoNotCollideForAmbiguousIds() throws {
@@ -483,7 +721,59 @@ struct PersistenceTests {
         let decoded = try JSONDecoder().decode(AppSettings.self, from: json)
         #expect(decoded.schemaVersion == 99)
         #expect(decoded.reduceMotion)
+        #expect(decoded.soundEnabled)
+        #expect(decoded.showFloatingPill == false)
         #expect(decoded.maxVisibleSessions == 3)
+    }
+
+    /// Core regression: refused save must not update store cache; UI must not
+    /// treat `try? save` as success after optimistic mutation (see AppModel note).
+    @Test func settingsUpdateRefusesNewerSchemaWithoutCachePoison() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-settings-update")
+        defer { cleanup() }
+        let paths = try TestSupport.makePaths(in: temp)
+
+        let original = Data(
+            #"""
+            {
+              "schemaVersion": 99,
+              "reduceMotion": true,
+              "soundEnabled": false,
+              "showFloatingPill": false,
+              "maxVisibleSessions": 3,
+              "futureOnlyKey": "keep"
+            }
+            """#.utf8
+        )
+        try original.write(to: paths.settingsFile, options: [.atomic])
+
+        let store = SettingsStore(paths: paths)
+        let loaded = try await store.load()
+        #expect(loaded.schemaVersion == 99)
+        #expect(loaded.showFloatingPill == false)
+        #expect(try await store.canSave() == false)
+
+        var threw = false
+        do {
+            _ = try await store.update { settings in
+                settings.showFloatingPill = true
+                settings.soundEnabled = true
+            }
+        } catch let error as SettingsStoreError {
+            threw = true
+            guard case .newerSchemaOnDisk = error else {
+                Issue.record("unexpected SettingsStoreError \(error)")
+                return
+            }
+        }
+        #expect(threw)
+
+        // Cache and disk still reflect the future schema load, not the mutation.
+        let after = try await store.load()
+        #expect(after.schemaVersion == 99)
+        #expect(after.showFloatingPill == false)
+        #expect(after.soundEnabled == false)
+        #expect(try Data(contentsOf: paths.settingsFile) == original)
     }
 
     @Test func settingsLoadDoesNotRewriteNewerSchemaFile() async throws {

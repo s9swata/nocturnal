@@ -225,18 +225,38 @@ final class AppModel {
 
     func updateSettings(_ mutate: (inout AppSettings) -> Void) async {
         // Ignore edits until bootstrap finishes so a late load cannot overwrite them.
-        guard isBootstrapped, settingsStore != nil else { return }
+        // Persist first; only then publish UI state — never optimistic mutate + try? save
+        // (future-schema refusal must leave toggles unchanged and surface status).
+        //
+        // Load → mutate on MainActor → save(value). Do not send the non-Sendable
+        // UI closure into SettingsStore.update (Swift 6 isolation).
+        guard isBootstrapped, let store = settingsStore else { return }
         let previousPill = settings.showFloatingPill
-        mutate(&settings)
-        try? await settingsStore?.save(settings)
-        if previousPill != settings.showFloatingPill {
-            syncOverlayVisibility()
+        do {
+            var next = try await store.load()
+            mutate(&next)
+            settings = try await store.save(next)
+            if previousPill != settings.showFloatingPill {
+                syncOverlayVisibility()
+            }
+            // Resize overlay if reduce motion or other prefs change while expanded.
+            overlay.refreshLayout(
+                expanded: isOverlayExpanded,
+                reduceMotion: prefersReducedMotion
+            )
+        } catch let error as SettingsStoreError {
+            switch error {
+            case .newerSchemaOnDisk(let onDisk, let supported):
+                statusMessage =
+                    "Could not save settings (schema \(onDisk) is newer than this app supports, \(supported))"
+            case .encodingFailed:
+                statusMessage = "Could not save settings (encoding failed)"
+            case .ioFailed(let detail):
+                statusMessage = "Could not save settings: \(detail)"
+            }
+        } catch {
+            statusMessage = "Could not save settings: \(error.localizedDescription)"
         }
-        // Resize overlay if reduce motion or other prefs change while expanded.
-        overlay.refreshLayout(
-            expanded: isOverlayExpanded,
-            reduceMotion: prefersReducedMotion
-        )
     }
 
     func selectSession(_ id: SessionID?) {

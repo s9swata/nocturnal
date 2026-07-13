@@ -7,9 +7,10 @@ import Foundation
 ///   ipc.sock
 ///   settings.json
 ///   sessions/
-///     <encoded-session-id>.json
+///     records/<encoded-session-id>.json   # canonical writes (disjoint subdir)
+///     <prior-or-legacy>.json             # flat candidates for migration only
 ///   responses/
-///     <encoded-request-id>.json          # ResponseFileEnvelope
+///     records/<encoded-request-id>.json  # ResponseFileEnvelope (canonical)
 ///     codex/<encoded-request-id>.json    # agent sidecar (never flat with envelopes)
 ///     claude/<encoded-request-id>.json
 ///     answer/<encoded-request-id>.json
@@ -19,8 +20,11 @@ import Foundation
 /// ```
 ///
 /// Session and response filenames use ``PathComponentEncoding`` so arbitrary IDs
-/// (`a/b` vs `a_b`, colons, etc.) never collide. Legacy underscore-sanitized
-/// names are still recognized for reads/migration.
+/// (`a/b` vs `a_b`, colons, case variants, literal `%XX` / `n.*` ids) never collide.
+/// Canonical writes live under the disjoint ``PathComponentEncoding/recordsDirectoryName``
+/// subdirectory with a case-stable body. Flat `n.`-prefixed and unprefixed percent
+/// layouts plus underscore-sanitized names remain read/migrate candidates only after
+/// embedded-ID verification.
 public struct PersistencePaths: Sendable, Equatable {
     public var root: URL
     public var settingsFile: URL
@@ -96,18 +100,55 @@ public struct PersistencePaths: Sendable, Equatable {
         return URL(fileURLWithPath: env)
     }
 
+    /// Canonical session records directory (`sessions/records/`).
+    public var sessionRecordsDirectory: URL {
+        sessionsDirectory.appendingPathComponent(
+            PathComponentEncoding.recordsDirectoryName,
+            isDirectory: true
+        )
+    }
+
+    /// Canonical response envelope directory (`responses/records/`).
+    public var responseRecordsDirectory: URL {
+        responsesDirectory.appendingPathComponent(
+            PathComponentEncoding.recordsDirectoryName,
+            isDirectory: true
+        )
+    }
+
     public func ensureDirectories(fileManager: FileManager = .default) throws {
-        for dir in [root, sessionsDirectory, responsesDirectory, backupsDirectory] {
+        for dir in [
+            root,
+            sessionsDirectory,
+            sessionRecordsDirectory,
+            responsesDirectory,
+            responseRecordsDirectory,
+            backupsDirectory,
+        ] {
             try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
         }
     }
 
     // MARK: - Session files
 
-    /// Canonical (collision-free) session file path for writes.
+    /// Canonical (collision-free) session file path for writes (`sessions/records/…`).
     public func sessionFile(for id: SessionID) -> URL {
-        sessionsDirectory.appendingPathComponent(
+        sessionRecordsDirectory.appendingPathComponent(
             "\(PathComponentEncoding.encode(id.rawValue)).json"
+        )
+    }
+
+    /// Flat `n.`-prefixed layout kept as an intermediate/prior compatibility read path.
+    public func priorPrefixedSessionFile(for id: SessionID) -> URL {
+        sessionsDirectory.appendingPathComponent(
+            "\(PathComponentEncoding.encodePriorPrefixed(id.rawValue)).json"
+        )
+    }
+
+    /// Pre-records percent-encoded path (uppercase unreserved, no prefix, flat).
+    public func priorEncodedSessionFile(for id: SessionID) -> URL {
+        sessionsDirectory.appendingPathComponent(
+            "\(PathComponentEncoding.encodePrior(id.rawValue)).json"
         )
     }
 
@@ -118,20 +159,37 @@ public struct PersistencePaths: Sendable, Equatable {
         )
     }
 
-    /// Candidate paths to try when reading a session (canonical first, then legacy).
+    /// Candidate paths to try when reading a session.
+    /// Order: canonical records/ → prior `n.` flat → prior unprefixed percent → legacy sanitize.
     public func sessionFileCandidates(for id: SessionID) -> [URL] {
-        let canonical = sessionFile(for: id)
-        let legacy = legacySessionFile(for: id)
-        if canonical == legacy { return [canonical] }
-        return [canonical, legacy]
+        uniqueURLs([
+            sessionFile(for: id),
+            priorPrefixedSessionFile(for: id),
+            priorEncodedSessionFile(for: id),
+            legacySessionFile(for: id),
+        ])
     }
 
     // MARK: - Response files
 
-    /// Canonical envelope path for a request / prompt id.
+    /// Canonical envelope path for a request / prompt id (`responses/records/…`).
     public func responseFile(for requestId: String) -> URL {
-        responsesDirectory.appendingPathComponent(
+        responseRecordsDirectory.appendingPathComponent(
             "\(PathComponentEncoding.encode(requestId)).json"
+        )
+    }
+
+    /// Flat `n.`-prefixed envelope path (intermediate/prior compatibility layout).
+    public func priorPrefixedResponseFile(for requestId: String) -> URL {
+        responsesDirectory.appendingPathComponent(
+            "\(PathComponentEncoding.encodePriorPrefixed(requestId)).json"
+        )
+    }
+
+    /// Pre-records percent-encoded envelope path (flat, unprefixed).
+    public func priorEncodedResponseFile(for requestId: String) -> URL {
+        responsesDirectory.appendingPathComponent(
+            "\(PathComponentEncoding.encodePrior(requestId)).json"
         )
     }
 
@@ -143,10 +201,24 @@ public struct PersistencePaths: Sendable, Equatable {
     }
 
     public func responseFileCandidates(for requestId: String) -> [URL] {
-        let canonical = responseFile(for: requestId)
-        let legacy = legacyResponseFile(for: requestId)
-        if canonical == legacy { return [canonical] }
-        return [canonical, legacy]
+        uniqueURLs([
+            responseFile(for: requestId),
+            priorPrefixedResponseFile(for: requestId),
+            priorEncodedResponseFile(for: requestId),
+            legacyResponseFile(for: requestId),
+        ])
+    }
+
+    private func uniqueURLs(_ urls: [URL]) -> [URL] {
+        var seen = Set<String>()
+        var result: [URL] = []
+        for url in urls {
+            let key = url.standardizedFileURL.path
+            if seen.insert(key).inserted {
+                result.append(url)
+            }
+        }
+        return result
     }
 
     /// Agent sidecar path under a dedicated subdirectory (never flat next to envelopes).
@@ -169,18 +241,66 @@ public struct PersistencePaths: Sendable, Equatable {
 /// Deterministic, collision-free encoding for arbitrary session / request IDs as
 /// single path components.
 ///
-/// **Encoding rules**
-/// - Unreserved ASCII (`A–Z a–z 0–9 - . ~`) is kept as-is.
-/// - Every other UTF-8 byte is percent-encoded (`%XX`, uppercase hex).
+/// **Canonical namespace (writes)**
+/// - Files live under ``recordsDirectoryName`` (`records/`) so the filename body
+///   never shares a flat directory with legacy or prior layouts. This is
+///   **provably disjoint** from arbitrary legacy ids such as literal `n.foo`
+///   (which previously collided with a flat `n.` filename prefix for id `foo`).
+/// - Case-stable body: only lowercase ASCII `a–z`, digits, and `- . ~` are kept
+///   unreserved. Uppercase letters and all other bytes are percent-encoded with
+///   **uppercase** hex (`%XX`). `Hello` and `hello` therefore map to distinct
+///   paths even on case-insensitive volumes (APFS default).
 ///
-/// This makes `a/b` → `a%2Fb` and `a_b` → `a_b` distinct, and similarly separates
-/// colon-bearing ids from underscore forms.
+/// **Prior / legacy layouts (reads + migration only)**
+/// - Flat `n.<body>.json` (intermediate/prior compatibility “prefix” layout)
+/// - Flat unprefixed percent-encode (uppercase letters unreserved)
+/// - Underscore sanitize (`/` and `:` → `_`), which collides (`a/b` vs `a_b`)
 ///
-/// **Legacy** builds replaced only `/` and `:` with `_`, which collides
-/// (`a/b` vs `a_b`). Readers still accept legacy names for migration.
+/// ``SessionPersistence`` migrates only after verifying the embedded session id
+/// and never overwrites a canonical file owned by a different id.
 public enum PathComponentEncoding: Sendable {
+    /// Disjoint subdirectory for all new canonical session / response records.
+    public static let recordsDirectoryName = "records"
+
+    /// Filename marker used by the intermediate/prior flat `n.` layout (reads only).
+    public static let priorPrefix = "n."
+
     /// Characters that never need escaping in a single filename component.
+    /// Uppercase ASCII is intentionally **excluded** for case-stable paths.
     private static let unreserved: Set<UInt8> = {
+        var set = Set<UInt8>()
+        for c in UInt8(ascii: "a")...UInt8(ascii: "z") { set.insert(c) }
+        for c in UInt8(ascii: "0")...UInt8(ascii: "9") { set.insert(c) }
+        set.insert(UInt8(ascii: "-"))
+        set.insert(UInt8(ascii: "."))
+        set.insert(UInt8(ascii: "~"))
+        return set
+    }()
+
+    /// Collision-free encoding for a new write (case-stable body under `records/`).
+    public static func encode(_ raw: String) -> String {
+        encodeBody(raw)
+    }
+
+    /// Case-stable body only. Exposed for tests / diagnostics.
+    public static func encodeBody(_ raw: String) -> String {
+        encodeWithUnreserved(raw, unreserved: unreserved)
+    }
+
+    /// Flat `n.`-prefixed case-stable name (prior layout; not used for new writes).
+    public static func encodePriorPrefixed(_ raw: String) -> String {
+        priorPrefix + encodeBody(raw)
+    }
+
+    /// Pre-records percent encoding kept for read/migration candidates.
+    ///
+    /// Unreserved includes uppercase `A–Z` (case-**un**stable on APFS) and has no
+    /// prefix — intermediate/prior layout before case-stable body encoding.
+    public static func encodePrior(_ raw: String) -> String {
+        encodeWithUnreserved(raw, unreserved: priorUnreserved)
+    }
+
+    private static let priorUnreserved: Set<UInt8> = {
         var set = Set<UInt8>()
         for c in UInt8(ascii: "A")...UInt8(ascii: "Z") { set.insert(c) }
         for c in UInt8(ascii: "a")...UInt8(ascii: "z") { set.insert(c) }
@@ -191,8 +311,7 @@ public enum PathComponentEncoding: Sendable {
         return set
     }()
 
-    /// Collision-free encoding for a new write.
-    public static func encode(_ raw: String) -> String {
+    private static func encodeWithUnreserved(_ raw: String, unreserved: Set<UInt8>) -> String {
         var output = ""
         output.reserveCapacity(raw.utf8.count)
         for byte in raw.utf8 {
@@ -202,17 +321,29 @@ public enum PathComponentEncoding: Sendable {
                 output.append(contentsOf: String(format: "%%%02X", byte))
             }
         }
-        // Empty ids still need a stable filename.
         return output.isEmpty ? "_empty" : output
     }
 
-    /// Best-effort reverse of ``encode(_:)``. Returns `nil` if the string is not
-    /// valid percent-encoding of UTF-8.
+    /// Best-effort reverse of ``encode(_:)`` / ``encodeBody(_:)``.
+    ///
+    /// Does **not** strip ``priorPrefix`` — a body of `n.foo` (literal id) round-trips
+    /// as `n.foo`. Use ``decodePriorPrefixed(_:)`` for flat `n.<body>` layout names.
+    /// Returns `nil` if the string is not valid percent-encoding of UTF-8.
     public static func decode(_ encoded: String) -> String? {
-        if encoded == "_empty" { return "" }
+        decodeBody(encoded)
+    }
+
+    /// Reverse of ``encodePriorPrefixed(_:)`` (`n.<body>` → raw id).
+    public static func decodePriorPrefixed(_ encoded: String) -> String? {
+        guard encoded.hasPrefix(priorPrefix) else { return nil }
+        return decodeBody(String(encoded.dropFirst(priorPrefix.count)))
+    }
+
+    private static func decodeBody(_ body: String) -> String? {
+        if body == "_empty" { return "" }
         var bytes: [UInt8] = []
-        bytes.reserveCapacity(encoded.utf8.count)
-        let utf8 = Array(encoded.utf8)
+        bytes.reserveCapacity(body.utf8.count)
+        let utf8 = Array(body.utf8)
         var i = 0
         while i < utf8.count {
             let byte = utf8[i]

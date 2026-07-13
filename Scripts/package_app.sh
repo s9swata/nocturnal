@@ -260,7 +260,9 @@ fi
 #   for every arch in ARCH_LIST; fail clearly on partial coverage.
 # - Single-arch: copy frameworks as-is.
 # - Multi-arch (universal): copy structure from the first arch, then `lipo -create`
-#   matching framework executables (top-level + nested *.framework binaries).
+#   matching framework Mach-O binaries (top-level + nested *.framework binaries).
+#   Discovery uses file(1) Mach-O detection — not the +x bit — because valid
+#   framework payloads may lack execute permission after copy or from third parties.
 # - Do not silently copy only one architecture into a multi-arch app bundle.
 # ---------------------------------------------------------------------------
 lipo_framework_tree() {
@@ -269,8 +271,10 @@ lipo_framework_tree() {
   shift
   local sources=("$@")
 
+  # Enumerate regular files; filter to Mach-O via file(1). Do not require -perm -111:
+  # non-executable Mach-O framework binaries are still valid lipo inputs.
   while IFS= read -r -d '' dest_bin; do
-    # Only merge real Mach-O files (skip scripts).
+    # Only merge real Mach-O files (skip plists, scripts, resources).
     if ! file "$dest_bin" | grep -q 'Mach-O'; then
       continue
     fi
@@ -287,7 +291,7 @@ lipo_framework_tree() {
     done
     lipo -create "${bins[@]}" -output "$dest_bin"
     verify_binary_arches "$dest_bin" "${ARCH_LIST[@]}"
-  done < <(find "$dest_fw" -type f -perm -111 -print0 2>/dev/null)
+  done < <(find "$dest_fw" -type f -print0 2>/dev/null)
 }
 
 embed_frameworks() {
@@ -332,8 +336,10 @@ embed_frameworks() {
       if [[ -d "$dir/$base" ]]; then
         sources+=("$dir/$base")
       else
-        echo "ERROR: framework $base missing under $dir (required for arches: ${ARCH_LIST[*]})" >&2
-        echo "ERROR: refusing to ship a single-arch framework inside a multi-arch app." >&2
+        echo "ERROR: framework $base missing under $dir (required for arch(es): ${ARCH_LIST[*]})" >&2
+        if [[ ${#ARCH_LIST[@]} -gt 1 ]]; then
+          echo "ERROR: refusing to ship a partial-arch framework set inside a multi-arch app." >&2
+        fi
         exit 1
       fi
     done
@@ -390,9 +396,12 @@ sign_frameworks() {
     if [[ ! -d "$fw" ]]; then
       continue
     fi
+    # Match lipo_framework_tree: sign Mach-O payloads even when they lack +x.
     while IFS= read -r -d '' bin; do
-      codesign "${CODESIGN_ARGS[@]}" "$bin"
-    done < <(find "$fw" -type f -perm -111 -print0)
+      if file "$bin" | grep -q 'Mach-O'; then
+        codesign "${CODESIGN_ARGS[@]}" "$bin"
+      fi
+    done < <(find "$fw" -type f -print0)
     codesign "${CODESIGN_ARGS[@]}" "$fw"
   done
 }

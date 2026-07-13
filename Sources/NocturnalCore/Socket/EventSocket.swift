@@ -95,8 +95,14 @@ public actor EventSocketServer {
         acceptTask = nil
         listener?.close()
         listener = nil
-        // Close client fds so off-actor blocking reads unblock promptly.
+        // Shutdown then close client fds so off-actor blocking reads unblock promptly.
+        // `close` alone can leave a peer `read` blocked on some Darwin kernels;
+        // `shutdown(SHUT_RDWR)` forces EOF/error on the blocked reader first.
         for handle in clientHandles.values {
+            let fd = handle.fileDescriptor
+            if fd >= 0 {
+                Darwin.shutdown(fd, SHUT_RDWR)
+            }
             try? handle.close()
         }
         clientHandles.removeAll()

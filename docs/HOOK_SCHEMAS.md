@@ -159,7 +159,8 @@ Agents must not block on Nocturnal availability.
 ## Response transport (out of band)
 
 User approvals / answers are written under Application Support `responses/`.
-Filenames use collision-free ``PathComponentEncoding`` (percent-encode unsafe bytes).
+Filenames use collision-free ``PathComponentEncoding`` under a disjoint `records/`
+subdirectory (case-stable percent-encode; prior flat / `n.` / underscore layouts are read-only migration candidates).
 
 | File | Shape |
 |------|--------|

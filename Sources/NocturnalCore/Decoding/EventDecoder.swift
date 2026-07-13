@@ -239,11 +239,9 @@ public struct EnvelopeNormalizer: Sendable {
         let raw = object["raw"]?.objectValue ?? original.asObject
         let timestamp = parseTimestamp(object["timestamp"]) ?? Date()
         let id = parseUUID(object["id"]) ?? UUID()
-        let schema: Int = {
-            if let exact = object["v"]?.exactIntValue { return exact }
-            if let n = object["v"]?.numberValue { return Int(n) }
-            return EventEnvelope.currentSchemaVersion
-        }()
+        // Only accept exact in-range integers for `v`. Truncating `Int(double)` can
+        // trap on oversized values; fractional / malformed → current schema.
+        let schema = object["v"]?.exactIntValue ?? EventEnvelope.currentSchemaVersion
 
         return EventEnvelope(
             id: id,

@@ -211,6 +211,60 @@ struct SocketBridgeTests {
 
         idleHold.cancel()
     }
+
+    /// `stop()` must release a blocked client read via shutdown (not hang on close alone).
+    @Test func stopUnblocksIdleClientReadViaShutdown() async throws {
+        let (temp, cleanup) = try TestSupport.makeShortSocketRoot(prefix: "nu")
+        defer { cleanup() }
+
+        let socketURL = SocketPaths.testingSocketPath(in: temp, name: "u.sock")
+        let server = EventSocketServer(path: socketURL)
+        _ = try await server.start()
+        try await Task.sleep(for: .milliseconds(50))
+
+        let pathString = socketURL.path
+        let idleClient = Task.detached {
+            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+            guard fd >= 0 else { return false }
+            defer { Darwin.close(fd) }
+            var addr = sockaddr_un()
+            addr.sun_family = sa_family_t(AF_UNIX)
+            pathString.withCString { src in
+                withUnsafeMutablePointer(to: &addr.sun_path) { dst in
+                    _ = strcpy(UnsafeMutableRawPointer(dst).assumingMemoryBound(to: CChar.self), src)
+                }
+            }
+            let connected = withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                    Darwin.connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            } == 0
+            guard connected else { return false }
+            // Block in read until server shutdown/close delivers EOF/error.
+            var buf = [UInt8](repeating: 0, count: 8)
+            let n = Darwin.read(fd, &buf, buf.count)
+            return n <= 0
+        }
+
+        try await Task.sleep(for: .milliseconds(80))
+
+        let stopStarted = ContinuousClock.now
+        await server.stop()
+        let stopElapsed = ContinuousClock.now - stopStarted
+        #expect(stopElapsed < .seconds(2))
+
+        let readReleased = await withTaskGroup(of: Bool.self) { group in
+            group.addTask { await idleClient.value }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(2))
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+        #expect(readReleased)
+    }
 }
 
 // MARK: - Jump-back scheme validation

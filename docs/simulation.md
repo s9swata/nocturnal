@@ -73,3 +73,9 @@ open build/Nocturnal.app
 ```
 
 Fixtures shipped in the app: `Contents/Resources/Fixtures/{codex,claude}/`.
+
+### Framework packaging notes (for maintainers)
+
+- Empty `Contents/Frameworks/` is expected today (no third-party frameworks).
+- Multi-arch packaging discovers framework **Mach-O** files with `file(1)`, not the execute bit — non-`+x` Mach-O payloads are still lipo’d and codesigned.
+- A missing framework for one arch fails hard; the “multi-arch / partial-arch” second error line is only printed when `ARCHES` lists more than one architecture.

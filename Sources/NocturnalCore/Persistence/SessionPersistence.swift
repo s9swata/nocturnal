@@ -57,12 +57,11 @@ public actor SessionPersistence {
         } catch {
             throw PersistenceError.ioFailed(error.localizedDescription)
         }
-        // Drop legacy filename only when its decoded content belongs to this
+        // Drop prior/legacy filenames only when decoded content belongs to this
         // session. Shared legacy names (e.g. a_b.json for both a/b and a_b)
         // must never remove another ID's file.
-        let legacy = paths.legacySessionFile(for: session.id)
-        if legacy != url {
-            removeIfOwned(url: legacy, by: session.id)
+        for candidate in paths.sessionFileCandidates(for: session.id) where candidate != url {
+            removeIfOwned(url: candidate, by: session.id)
         }
     }
 
@@ -101,28 +100,33 @@ public actor SessionPersistence {
         lastLoadSkipped = []
         let urls: [URL]
         do {
-            urls = try fileManager.contentsOfDirectory(
-                at: paths.sessionsDirectory,
-                includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
-                options: [.skipsHiddenFiles]
+            // Canonical records/ plus any flat prior/legacy files under sessions/.
+            urls = try Self.sessionJSONFiles(
+                under: paths.sessionsDirectory,
+                recordsDirectory: paths.sessionRecordsDirectory,
+                fileManager: fileManager
             )
-            .filter { url in
-                var isDir: ObjCBool = false
-                guard fileManager.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else {
-                    return false
-                }
-                return url.pathExtension == "json"
-            }
         } catch {
             throw PersistenceError.ioFailed(error.localizedDescription)
         }
 
-        var sessions: [Session] = []
+        // Prefer canonical `records/` content when the same id appears mid-migration.
+        var sessionsByID: [SessionID: (session: Session, fromCanonical: Bool)] = [:]
         for url in urls {
             do {
                 let data = try Data(contentsOf: url)
                 let session = try decoder.decode(Session.self, from: data)
-                sessions.append(session)
+                let canonicalPath = paths.sessionFile(for: session.id).standardizedFileURL.path
+                let isCanonical = url.standardizedFileURL.path == canonicalPath
+                if let existing = sessionsByID[session.id] {
+                    if isCanonical {
+                        sessionsByID[session.id] = (session, true)
+                    } else if !existing.fromCanonical, session.updatedAt >= existing.session.updatedAt {
+                        sessionsByID[session.id] = (session, false)
+                    }
+                } else {
+                    sessionsByID[session.id] = (session, isCanonical)
+                }
             } catch {
                 lastLoadSkipped.append(url.lastPathComponent)
                 if quarantineCorrupt {
@@ -131,7 +135,7 @@ public actor SessionPersistence {
                 continue
             }
         }
-        return sessions.sorted { $0.updatedAt > $1.updatedAt }
+        return sessionsByID.values.map(\.session).sorted { $0.updatedAt > $1.updatedAt }
     }
 
     public func delete(id: SessionID) throws {
@@ -165,38 +169,96 @@ public actor SessionPersistence {
         }
     }
 
-    /// Remove **every** regular file in the sessions directory, including
-    /// malformed/unreadable JSON. Directory entries (and the sessions directory
-    /// itself) are left alone.
+    /// Remove **regular non-symlink files** under `sessions/` and `sessions/records/`,
+    /// including malformed/unreadable JSON. Directories, symlinks, FIFOs, sockets, and
+    /// other special nodes are left alone so a mis-placed `ipc.sock` / FIFO is never unlinked.
     public func deleteAll() throws {
         try paths.ensureDirectories(fileManager: fileManager)
-        let urls: [URL]
-        do {
-            urls = try fileManager.contentsOfDirectory(
-                at: paths.sessionsDirectory,
-                includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
-                options: []
-            )
-        } catch {
-            throw PersistenceError.ioFailed(error.localizedDescription)
-        }
-
         var firstError: Error?
-        for url in urls {
-            // Never delete the directory itself or nested directories (metadata/subdirs).
-            var isDir: ObjCBool = false
-            guard fileManager.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
-            if isDir.boolValue { continue }
-
+        for directory in [paths.sessionsDirectory, paths.sessionRecordsDirectory] {
+            let urls: [URL]
             do {
-                try fileManager.removeItem(at: url)
+                urls = try fileManager.contentsOfDirectory(
+                    at: directory,
+                    includingPropertiesForKeys: [
+                        .isDirectoryKey,
+                        .isRegularFileKey,
+                        .isSymbolicLinkKey,
+                    ],
+                    options: []
+                )
             } catch {
-                if firstError == nil { firstError = error }
+                throw PersistenceError.ioFailed(error.localizedDescription)
+            }
+
+            for url in urls {
+                guard Self.isRemovableSessionFile(url, fileManager: fileManager) else { continue }
+
+                do {
+                    try fileManager.removeItem(at: url)
+                } catch {
+                    if firstError == nil { firstError = error }
+                }
             }
         }
         if let firstError {
             throw PersistenceError.ioFailed(firstError.localizedDescription)
         }
+    }
+
+    /// Regular files only — never directories, symlinks, FIFOs, or sockets.
+    private static func isRemovableSessionFile(_ url: URL, fileManager: FileManager) -> Bool {
+        if let values = try? url.resourceValues(forKeys: [
+            .isDirectoryKey,
+            .isRegularFileKey,
+            .isSymbolicLinkKey,
+        ]) {
+            if values.isDirectory == true { return false }
+            if values.isSymbolicLink == true { return false }
+            if values.isRegularFile == true { return true }
+            return false
+        }
+        // Fallback when resource values are unavailable: POSIX mode check.
+        guard let attrs = try? fileManager.attributesOfItem(atPath: url.path),
+              let type = attrs[.type] as? FileAttributeType
+        else {
+            return false
+        }
+        return type == .typeRegular
+    }
+
+    /// JSON session candidates: flat files under `sessions/` plus files in `records/`.
+    private static func sessionJSONFiles(
+        under sessionsDirectory: URL,
+        recordsDirectory: URL,
+        fileManager: FileManager
+    ) throws -> [URL] {
+        var result: [URL] = []
+        var seen = Set<String>()
+
+        func appendJSON(from directory: URL) throws {
+            guard fileManager.fileExists(atPath: directory.path) else { return }
+            let urls = try fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
+            for url in urls {
+                var isDir: ObjCBool = false
+                guard fileManager.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else {
+                    continue
+                }
+                guard url.pathExtension == "json" else { continue }
+                let key = url.standardizedFileURL.path
+                if seen.insert(key).inserted {
+                    result.append(url)
+                }
+            }
+        }
+
+        try appendJSON(from: sessionsDirectory)
+        try appendJSON(from: recordsDirectory)
+        return result
     }
 
     // MARK: - Ownership helpers
@@ -217,6 +279,9 @@ public actor SessionPersistence {
     /// Write matching content to the canonical path, then drop the legacy file
     /// only after a successful write. Caller must already verify
     /// `session.id` equals the requested ID.
+    ///
+    /// Never overwrites a canonical file that already belongs to a **different**
+    /// session id (embedded ID is authoritative).
     private func migrateLegacyIfOwned(
         session: Session,
         from legacy: URL,
@@ -225,7 +290,16 @@ public actor SessionPersistence {
     ) {
         guard legacy != canonical else { return }
         do {
-            if !fileManager.fileExists(atPath: canonical.path) {
+            try fileManager.createDirectory(
+                at: canonical.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            if fileManager.fileExists(atPath: canonical.path) {
+                // Refuse to clobber another record that already occupies this slot.
+                if let onDisk = try? decodeSession(at: canonical), onDisk.id != session.id {
+                    return
+                }
+            } else {
                 try data.write(to: canonical, options: [.atomic])
             }
             // Only remove legacy after canonical is present with matching ownership.

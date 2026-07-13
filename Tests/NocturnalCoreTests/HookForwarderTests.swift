@@ -153,4 +153,56 @@ struct HookForwarderTests {
         #expect(data.isEmpty)
         #expect(elapsed < 1.0)
     }
+
+    @Test func oversizedNormalizedEnvelopeRejectedBeforeSend() {
+        // Near-1MiB stdin is accepted by StdinReader, but normalization duplicates
+        // the object into payload + raw, exceeding the socket frame. Fail open
+        // without attempting a doomed send.
+        let blob = String(repeating: "x", count: 600_000)
+        let object: [String: Any] = [
+            "type": "session.started",
+            "session_id": "big-sess",
+            "blob": blob,
+        ]
+        // Ensure the raw line itself is under the stdin cap.
+        let rawData = try! JSONSerialization.data(withJSONObject: object)
+        #expect(rawData.count < StdinReader.defaultMaxBytes)
+        #expect(rawData.count > 500_000)
+
+        let forwarder = FailOpenHookForwarder(
+            options: HookForwarderOptions(connectTimeout: 0.1)
+        )
+        let result = forwarder.forward(
+            line: rawData,
+            socketPath: URL(fileURLWithPath: "/tmp/nocturnal-oversize-frame.sock")
+        )
+        #expect(result.succeeded == false)
+        #expect(result.detail.contains("frame limit") || result.detail.contains("exceeds"))
+        // Must not look like a connect/socket-path failure — we reject pre-send.
+        #expect(result.detail.contains("socket unavailable") == false)
+    }
+
+    @Test func deliverableNormalizedEnvelopeStillSends() async throws {
+        let (root, cleanup) = try TestSupport.makeShortSocketRoot(prefix: "fwd-ok-size")
+        defer { cleanup() }
+
+        let socketURL = root.appendingPathComponent("ipc.sock")
+        let server = EventSocketServer(path: socketURL)
+        let stream = try await server.start()
+        try await Task.sleep(for: .milliseconds(40))
+
+        let raw = Data(#"{"type":"session.started","session_id":"small","note":"ok"}"#.utf8)
+        let forwarder = FailOpenHookForwarder(options: HookForwarderOptions(connectTimeout: 2.0))
+        let result = forwarder.forward(line: raw, socketPath: socketURL)
+        #expect(result.succeeded)
+        #expect(result.detail.contains("sent"))
+
+        var received: EventEnvelope?
+        for await event in stream {
+            received = event
+            break
+        }
+        #expect(received?.sessionId == "small")
+        await server.stop()
+    }
 }

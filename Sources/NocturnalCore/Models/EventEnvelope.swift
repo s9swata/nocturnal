@@ -76,8 +76,19 @@ public struct EventEnvelope: Codable, Sendable, Hashable, Identifiable {
             id = UUID()
         }
 
-        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion)
-            ?? EventEnvelope.currentSchemaVersion
+        // Prefer exact Int; oversized / fractional / string `v` falls back safely
+        // (never trap via truncating Double→Int conversion).
+        if let exact = try? container.decode(Int.self, forKey: .schemaVersion) {
+            schemaVersion = exact
+        } else if let number = try? container.decode(Double.self, forKey: .schemaVersion),
+                  number.isFinite,
+                  number.rounded(.towardZero) == number,
+                  let exact = Int(exactly: number)
+        {
+            schemaVersion = exact
+        } else {
+            schemaVersion = EventEnvelope.currentSchemaVersion
+        }
 
         let explicitSourceRaw = try container.decodeIfPresent(String.self, forKey: .sourceRaw)
 
@@ -148,9 +159,12 @@ enum EventEnvelopeDateParsing {
     }
 
     /// Epoch seconds or milliseconds (heuristic: values ≥ 1e12 are ms).
+    ///
+    /// The boundary `1_000_000_000_000` (exactly) is treated as **milliseconds**
+    /// so wire values at the ms threshold are not misinterpreted as ~33k CE seconds.
     static func parseEpoch(_ number: Double) -> Date? {
         guard number.isFinite else { return nil }
-        if number > 1_000_000_000_000 {
+        if number >= 1_000_000_000_000 {
             return Date(timeIntervalSince1970: number / 1000)
         }
         return Date(timeIntervalSince1970: number)
@@ -259,16 +273,10 @@ public enum JSONValue: Codable, Sendable, Hashable {
         guard value.isFinite else { return nil }
         // Must be integral (no fractional part).
         guard value.rounded(.towardZero) == value else { return nil }
-        // Bound to Int64 before converting — avoids Int trap on 32-bit and
-        // avoids imprecise Double→Int for values near Int.max.
-        let asInt64 = Int64(exactly: value)
-        if let asInt64 {
-            return String(asInt64)
-        }
-        // Integers outside Int64 but still exact in Double (rare): format without
-        // scientific notation via truncating remainder check already done.
-        // Fall back to fixed formatting only for whole numbers.
-        return String(format: "%.0f", value)
+        // Bound to Int64 — out-of-range returns nil (matches documentation;
+        // do not fall back to `String(format:)` which reintroduces imprecise paths).
+        guard let asInt64 = Int64(exactly: value) else { return nil }
+        return String(asInt64)
     }
 
     /// Failable exact integer conversion (no trap on out-of-range doubles).

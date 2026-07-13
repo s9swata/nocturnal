@@ -2,7 +2,7 @@
 
 **Author:** nocturnal-core  
 **Date:** 2026-07-13  
-**Status:** Production MVP + confirmed robustness fixes; `swift test` green (126 tests).
+**Status:** Production MVP + review-fix pass; `swift test` green (156 tests).
 
 ---
 
@@ -10,24 +10,25 @@
 
 | Area | Status |
 |------|--------|
-| `EventSocketServer` / `EventSocketClient` | Multi-client NDJSON; **off-actor client reads**; cancel-safe stop (closes idle clients); `SO_NOSIGPIPE` |
-| `SessionStore` | Cap/prune; **stale events never rewind/revive terminal**; mismatched approval/question IDs are no-ops; `replaceAll` last-wins without trap |
-| Decoders | Codex + Claude implemented sets; metrics by **inferred** source; epoch timestamps via shared parser; incomplete envelope fast-path rejected |
-| Persistence | Atomic JSON; corrupt quarantine; **`deleteAll` removes all files** (not only decodable sessions); collision-free path encoding |
+| `EventSocketServer` / `EventSocketClient` | Multi-client NDJSON; **off-actor client reads**; cancel-safe stop (**`shutdown` + close** idle clients); `SO_NOSIGPIPE` |
+| `SessionStore` | Cap/prune; **stale events never rewind/revive terminal or promote ordering**; mismatched approval/question IDs are no-ops; `replaceAll` last-wins without trap |
+| Decoders | Codex + Claude implemented sets; metrics by **inferred** source; epoch timestamps via shared parser (**≥ 1e12 = ms**); incomplete envelope fast-path rejected; malformed/`v` uses `exactIntValue` fallback |
+| Persistence | Atomic JSON; corrupt quarantine; **`deleteAll` removes regular non-symlink files only**; disjoint **`records/`** path namespace + case-stable encoding |
 | `ResponseTransport` | Envelope + **subdir sidecars** (`codex/`, `claude/`, `answer/`) — no flat namespace collision with `codex-x` |
 | `JumpBackCoordinator` | Codex schemes allowlisted (`codex`, `openai-codex`); AppleScript on **MainActor** |
-| Settings | Schema v2; **never downgrade/rewrite newer schema (e.g. 99)**; load is read-only |
+| Settings | Schema v2; **never downgrade/rewrite newer schema (e.g. 99)**; load is read-only; **`update(_:)` / `canSave()`** for safe UI writes |
 | Socket paths | `NOCTURNAL_APP_SUPPORT`; **explicit > env > default**; no eager App Support create when socket override set |
 
 ---
 
 ## Migration / compatibility notes (2026-07-13 robustness pass)
 
-1. **Session / response filenames** use `PathComponentEncoding` (percent-encode non-unreserved UTF-8). Reads fall back to legacy `/`+`:` → `_` sanitize. New writes use encoded names only. **Embedded `Session.id` is authoritative:** `load` / `save` legacy cleanup / `delete` never claim, migrate, or remove a legacy candidate whose decoded id differs from the request (e.g. shared `a_b.json` for `a/b` vs `a_b`). Matching legacy files migrate to the canonical path on successful `load`.
-2. **Response sidecars** moved from flat `codex-<id>.json` to `responses/codex/<encoded>.json` (same for `claude/`, `answer/`). Consumers must look in subdirs.
-3. **Settings:** loading a schemaVersion `> current` leaves the file untouched; `SettingsStore.save` throws `newerSchemaOnDisk`. Older schemas migrate in-memory only (no save-on-load).
+1. **Session / response filenames** use a disjoint **`records/`** subdirectory for canonical writes plus **case-stable** `PathComponentEncoding` (uppercase ASCII is percent-encoded). Reads try: `…/records/<body>` → flat prior `n.<body>` → flat unprefixed percent-encode → legacy `/`+`:` → `_` sanitize. New writes never use a flat `n.` filename prefix (that layout collided: id `foo` → `n.foo.json` vs literal id `n.foo`). **Embedded `Session.id` is authoritative** before any migrate/delete; migration never overwrites a foreign canonical record.
+2. **Response sidecars** live under `responses/codex/<encoded>.json` (same for `claude/`, `answer/`). Envelopes live under `responses/records/`.
+3. **Settings:** loading a schemaVersion `> current` leaves the file untouched; `SettingsStore.save` throws `newerSchemaOnDisk`. Older schemas migrate in-memory only (no save-on-load). Prefer `settingsStore.update { … }` over mutate-then-`try? save`. **UI (`AppModel.updateSettings`) assigns published settings only after a successful update.**
 4. **Claude `permission_mode`:** only `ask` / `default` / `prompt` create approvals; `none` / `off` / `allow` / `bypassPermissions` / `acceptEdits` / etc. do not.
 5. **`sourceRaw`** is preserved across encode/decode hops when present.
+6. **`JSONValue.exactIntegerString`** returns `nil` outside exact `Int64` (no `String(format:)` fallback).
 
 ---
 
@@ -73,7 +74,16 @@ let snap = await store.currentSnapshot()
 | Approve / deny | write via `ResponseTransporting.submit(.approval)` then `await store.applyLocalResponse(...)` |
 | Answer question | same with `.question` |
 | Jump back | `JumpBackCoordinator().jump(using: session.jumpBack ?? JumpBackContext(workingDirectory: session.workingDirectory))` |
-| Settings | `SettingsStore.load()` / `save(_:)` |
+| Settings | Prefer `SettingsStore.update { … }` (or `canSave()` + `save` with catch). **Never** optimistic mutate + `try? save` |
+
+### Settings UI contract (`AppModel.updateSettings`)
+
+Core refuses future-schema overwrites (`SettingsStoreError.newerSchemaOnDisk`).
+**App must not** optimistically mutate published settings then `try? save`.
+`AppModel.updateSettings` loads, mutates on MainActor, then `settings = try await store.save(next)`
+and surfaces `SettingsStoreError` on `statusMessage` without changing UI state on failure.
+
+Core regressions: `settingsSaveRefusesToOverwriteNewerSchema`, `settingsUpdateRefusesNewerSchemaWithoutCachePoison`.
 
 ### Key models (all `Sendable`)
 

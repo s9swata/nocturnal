@@ -575,6 +575,45 @@ public struct HookInstaller: Sendable {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
+    /// Escape a string for embedding inside a JSON double-quoted string value.
+    ///
+    /// Handles backslash, quotes, and all JSON control characters (`\n`, `\r`,
+    /// `\t`, `\u0000`–`\u001F`, etc.). Incomplete escaping (slash/quote only)
+    /// produces invalid sidecar JSON when forwarder/socket paths contain those
+    /// characters.
+    public static func escapeJSONStringContents(_ value: String) -> String {
+        if let data = try? JSONSerialization.data(
+            withJSONObject: value,
+            options: [.fragmentsAllowed]
+        ),
+           let quoted = String(data: data, encoding: .utf8),
+           quoted.count >= 2,
+           quoted.first == "\"",
+           quoted.last == "\""
+        {
+            return String(quoted.dropFirst().dropLast())
+        }
+        // Fallback: manual RFC 8259 string content escaping.
+        var out = ""
+        out.reserveCapacity(value.utf8.count + 8)
+        for scalar in value.unicodeScalars {
+            switch scalar.value {
+            case 0x22: out += "\\\"" // "
+            case 0x5C: out += "\\\\" // \
+            case 0x08: out += "\\b"
+            case 0x0C: out += "\\f"
+            case 0x0A: out += "\\n"
+            case 0x0D: out += "\\r"
+            case 0x09: out += "\\t"
+            case 0x00...0x1F:
+                out += String(format: "\\u%04x", scalar.value)
+            default:
+                out.unicodeScalars.append(scalar)
+            }
+        }
+        return out
+    }
+
     public func forwarderCommand() -> String {
         let socket = Self.shellQuote(socketPath.path)
         let binary = Self.shellQuote(forwarderBinaryPath.path)
@@ -586,20 +625,15 @@ public struct HookInstaller: Sendable {
     /// this file is a Nocturnal-managed sidecar the setup CLI owns.
     public func hookConfigJSON(for product: HookProduct) -> String {
         let command = forwarderCommand()
-        let escaped = command
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        let forwarderEscaped = forwarderBinaryPath.path
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        let socketEscaped = socketPath.path
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
+        let escaped = Self.escapeJSONStringContents(command)
+        let forwarderEscaped = Self.escapeJSONStringContents(forwarderBinaryPath.path)
+        let socketEscaped = Self.escapeJSONStringContents(socketPath.path)
+        let productEscaped = Self.escapeJSONStringContents(product.rawValue)
 
         return """
         {
           "\(Self.managedKey)": true,
-          "product": "\(product.rawValue)",
+          "product": "\(productEscaped)",
           "version": 1,
           "forwarder": "\(forwarderEscaped)",
           "socket": "\(socketEscaped)",

@@ -140,16 +140,52 @@ struct HookInstallerTests {
         )
 
         let command = installer.forwarderCommand()
-        #expect(command.contains("NOCTURNAL_SOCKET='"))
+        let quotedSocket = HookInstaller.shellQuote(socket.path)
+        let quotedBinary = HookInstaller.shellQuote(binary.path)
+        // Direct quoted-value check (not environment-dependent prefixes like /Users).
+        #expect(command == "NOCTURNAL_SOCKET=\(quotedSocket) \(quotedBinary)")
         #expect(command.contains("Application Support"))
-        #expect(command.contains("'\(binary.path)'") || command.contains(HookInstaller.shellQuote(binary.path)))
-        // Unquoted space would break shell tokenization of Application Support.
-        #expect(command.contains("SOCKET=/Users") == false)
+        #expect(quotedSocket.hasPrefix("'") && quotedSocket.hasSuffix("'"))
 
         _ = try installer.install(product: .codex)
         let body = try String(contentsOf: installer.configURL(for: .codex), encoding: .utf8)
         #expect(body.contains("Application Support"))
         #expect(body.contains("NOCTURNAL_SOCKET="))
+    }
+
+    @Test func sidecarJSONEscapesControlCharactersInPaths() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-hooks-escape")
+        defer { cleanup() }
+
+        // Paths with JSON control characters that break slash/quote-only escaping.
+        let socketPath = temp.appendingPathComponent("sock\nwith\tctrl.sock")
+        let binaryPath = temp.appendingPathComponent("fwd\"quote\\slash")
+        let installer = HookInstaller(
+            configRoot: temp,
+            forwarderBinaryPath: binaryPath,
+            socketPath: socketPath,
+            backupsDirectory: temp.appendingPathComponent("backups", isDirectory: true)
+        )
+
+        let body = installer.hookConfigJSON(for: .codex)
+        let data = try #require(body.data(using: .utf8))
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["socket"] as? String == socketPath.path)
+        #expect(json["forwarder"] as? String == binaryPath.path)
+        #expect((json["command"] as? String)?.contains("NOCTURNAL_SOCKET=") == true)
+    }
+
+    @Test func escapeJSONStringContentsHandlesControlsAndQuotes() throws {
+        let raw = "line1\nline2\t\"quoted\"\\slash\u{0001}"
+        let escaped = HookInstaller.escapeJSONStringContents(raw)
+        let wrapped = "\"\(escaped)\""
+        let data = try #require(wrapped.data(using: .utf8))
+        let decoded = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? String
+        #expect(decoded == raw)
+        #expect(escaped.contains("\\n"))
+        #expect(escaped.contains("\\t"))
+        #expect(escaped.contains("\\\""))
+        #expect(escaped.contains("\\\\"))
     }
 
     @Test func mergeNativeBacksUpMalformedCodexHooksJSON() throws {
@@ -227,7 +263,8 @@ struct HookInstallerTests {
         #expect(hooks.count >= 3)
     }
 
-    @Test func mergeNativeBacksUpInvalidSidecarBeforeOverwrite() throws {
+    /// Default (sidecar) mode backs up an invalid existing sidecar before overwrite.
+    @Test func sidecarBacksUpInvalidFileBeforeOverwrite() throws {
         let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-hooks-bad-sidecar")
         defer { cleanup() }
 
@@ -237,7 +274,9 @@ struct HookInstallerTests {
             forwarderBinaryPath: URL(fileURLWithPath: "/tmp/fwd"),
             socketPath: URL(fileURLWithPath: "/tmp/s.sock"),
             backupsDirectory: backups
+            // default mode: .sidecar
         )
+        #expect(installer.mode == .sidecar)
 
         let sidecar = installer.configURL(for: .claude)
         try FileManager.default.createDirectory(at: sidecar.deletingLastPathComponent(), withIntermediateDirectories: true)

@@ -359,4 +359,48 @@ struct SessionStoreTests {
         #expect(dup?.source == .claude)
         #expect(dup?.state == .running)
     }
+
+    /// Stale events must not promote a session to the front of the list.
+    @Test func staleEventDoesNotPromoteSessionOrdering() async {
+        let store = SessionStore(policy: SessionStorePolicy(autoPersist: false))
+        let now = Date()
+        let tOlder = now.addingTimeInterval(-60)
+        let tNewer = now.addingTimeInterval(-5)
+
+        _ = await store.apply(EventEnvelope(
+            source: .codex,
+            eventType: "session.started",
+            sessionId: "front-me",
+            timestamp: tOlder,
+            payload: ["title": .string("older-session")]
+        ))
+        _ = await store.apply(EventEnvelope(
+            source: .codex,
+            eventType: "session.started",
+            sessionId: "keep-front",
+            timestamp: tNewer,
+            payload: ["title": .string("newer-session")]
+        ))
+
+        let before = await store.allSessions().map(\.id.rawValue)
+        #expect(before.first == "keep-front")
+        #expect(before == ["keep-front", "front-me"])
+
+        // Stale event for the older session: metadata may merge, order must hold.
+        _ = await store.apply(EventEnvelope(
+            source: .codex,
+            eventType: "session.started",
+            sessionId: "front-me",
+            timestamp: tOlder.addingTimeInterval(-10),
+            payload: ["title": .string("stale-title")]
+        ))
+
+        let after = await store.allSessions().map(\.id.rawValue)
+        #expect(after == ["keep-front", "front-me"])
+        let staleSession = await store.session(id: SessionID("front-me"))
+        #expect(staleSession?.updatedAt == tOlder)
+        // Stale policy still merges title metadata; only lifecycle/order are frozen.
+        #expect(staleSession?.title == "stale-title")
+        #expect(staleSession?.state == .running)
+    }
 }

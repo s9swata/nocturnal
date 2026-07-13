@@ -25,7 +25,10 @@ public struct HookForwardResult: Sendable, Equatable {
 
 /// Options for the fail-open forwarder.
 public struct HookForwarderOptions: Sendable, Equatable {
-    /// Connect timeout in seconds.
+    /// Connect timeout upper bound (seconds) safe for Int32 millisecond conversion.
+    public static let maxConnectTimeout: TimeInterval = HookForwarderCLIOptions.maxTimeout
+
+    /// Connect timeout in seconds (always positive, finite, ≤ ``maxConnectTimeout``).
     public var connectTimeout: TimeInterval
     /// Hint for ``EnvelopeNormalizer`` when wrapping non-envelope JSON.
     public var wrapSource: AgentSource?
@@ -35,11 +38,17 @@ public struct HookForwarderOptions: Sendable, Equatable {
     public static let `default` = HookForwarderOptions()
 
     public init(
-        connectTimeout: TimeInterval = 0.5,
+        connectTimeout: TimeInterval = HookForwarderCLIOptions.defaultTimeout,
         wrapSource: AgentSource? = nil,
         defaultSessionId: String? = nil
     ) {
-        self.connectTimeout = connectTimeout
+        // Clamp so downstream EventSocketClient poll/setsockopt never trap on
+        // Int32(timeout * 1000) with huge or non-finite values.
+        if connectTimeout.isFinite, connectTimeout > 0 {
+            self.connectTimeout = min(connectTimeout, Self.maxConnectTimeout)
+        } else {
+            self.connectTimeout = HookForwarderCLIOptions.defaultTimeout
+        }
         self.wrapSource = wrapSource
         self.defaultSessionId = defaultSessionId
     }
@@ -76,6 +85,19 @@ public struct FailOpenHookForwarder: HookForwarding {
         guard let payload = try? encoder.encode(envelope) else {
             // Fail open for the agent: report write failure, never throw.
             return HookForwardResult(succeeded: false, detail: "envelope encode failed")
+        }
+
+        // Stdin may accept up to `defaultMaxBytes`, but normalization embeds the
+        // upstream object in both `payload` and `raw`, so the encoded envelope can
+        // exceed the socket line frame. Reject before send (fail-open, no throw).
+        let maxFrameBytes = StdinReader.defaultMaxBytes
+        // sendRawLine appends a trailing newline; the server counts the line body.
+        if payload.count > maxFrameBytes {
+            return HookForwardResult(
+                succeeded: false,
+                detail:
+                    "normalized envelope exceeds socket frame limit (\(payload.count) > \(maxFrameBytes) bytes)"
+            )
         }
 
         do {

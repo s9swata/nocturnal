@@ -19,6 +19,12 @@ struct CLIParsingTests {
         #expect(CLIArgumentParser.value(for: "--timeout", in: args) == .value("1.5"))
     }
 
+    @Test func flagValueRejectsEmptyToken() {
+        #expect(CLIArgumentParser.value(for: "--forwarder", in: ["--forwarder", ""]) == .missingValue)
+        #expect(CLIArgumentParser.value(for: "--socket", in: ["--socket", ""]) == .missingValue)
+        #expect(CLIArgumentParser.value(for: "--timeout", in: ["--timeout", ""]) == .missingValue)
+    }
+
     @Test func flagValueAbsentWhenNotPresent() {
         #expect(CLIArgumentParser.value(for: "--socket", in: ["--help"]) == .absent)
     }
@@ -69,6 +75,10 @@ struct CLIParsingTests {
         #expect(throws: SetupCLIParseError.missingForwarderValue) {
             _ = try SetupCLIOptions.parse(arguments: ["status", "--forwarder", "--product", "codex"])
         }
+        // Explicit empty token must not be accepted as a path.
+        #expect(throws: SetupCLIParseError.missingForwarderValue) {
+            _ = try SetupCLIOptions.parse(arguments: ["status", "--forwarder", ""])
+        }
     }
 
     @Test func setupUnknownProductIsError() {
@@ -106,5 +116,41 @@ struct CLIParsingTests {
         #expect(parsed.sessionId == "s1")
         #expect(parsed.timeout == 0.25)
         #expect(parsed.warnings.isEmpty)
+    }
+
+    @Test func forwarderCLIRejectsEmptySocketToken() {
+        let parsed = HookForwarderCLIOptions.parse(arguments: ["--socket", ""])
+        #expect(parsed.socketPath == nil)
+        #expect(parsed.warnings.contains { $0.contains("--socket") })
+    }
+
+    @Test func forwarderCLICapsHugeTimeout() {
+        let parsed = HookForwarderCLIOptions.parse(arguments: ["--timeout", "1e20"])
+        #expect(parsed.timeout == HookForwarderCLIOptions.maxTimeout)
+        #expect(parsed.timeout.isFinite)
+        // Millisecond conversion must fit Int32 without trapping.
+        let millis = (parsed.timeout * 1000).rounded(.up)
+        #expect(millis <= Double(Int32.max))
+        #expect(Int32(millis) >= 0)
+        #expect(parsed.warnings.contains { $0.contains("capped") })
+    }
+
+    @Test func forwarderCLIRejectsNonfiniteTimeout() {
+        for raw in ["nan", "inf", "-inf", "Infinity", "0", "-1", "not-a-number"] {
+            let parsed = HookForwarderCLIOptions.parse(arguments: ["--timeout", raw])
+            #expect(parsed.timeout == HookForwarderCLIOptions.defaultTimeout, "raw=\(raw)")
+            #expect(parsed.warnings.contains { $0.contains("--timeout") }, "raw=\(raw)")
+        }
+    }
+
+    @Test func hookForwarderOptionsClampsNonfiniteAndHugeTimeout() {
+        let huge = HookForwarderOptions(connectTimeout: 1e300)
+        #expect(huge.connectTimeout == HookForwarderOptions.maxConnectTimeout)
+
+        let nan = HookForwarderOptions(connectTimeout: .nan)
+        #expect(nan.connectTimeout == HookForwarderCLIOptions.defaultTimeout)
+
+        let inf = HookForwarderOptions(connectTimeout: .infinity)
+        #expect(inf.connectTimeout == HookForwarderCLIOptions.defaultTimeout)
     }
 }

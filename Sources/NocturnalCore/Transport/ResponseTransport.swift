@@ -10,15 +10,16 @@ import Foundation
 ///
 /// ```
 /// responses/
-///   <encoded-request-id>.json           # ResponseFileEnvelope (canonical)
-///   codex/<encoded-request-id>.json     # Codex-ish flat decision sidecar
+///   records/<encoded-request-id>.json   # ResponseFileEnvelope (canonical)
+///   codex/<encoded-request-id>.json     # Codex-ish decision sidecar
 ///   claude/<encoded-request-id>.json    # Claude-ish permission sidecar
-///   answer/<encoded-request-id>.json    # Flat question answer sidecar
+///   answer/<encoded-request-id>.json    # Question answer sidecar
 /// ```
 ///
-/// Filenames use ``PathComponentEncoding``. Sidecars live in **subdirectories**
-/// so envelope id `codex-x` never collides with the Codex sidecar for id `x`
-/// (older flat layout wrote both as `codex-x.json` in the same folder).
+/// Filenames use ``PathComponentEncoding``. Envelopes live under `records/` so
+/// they never share a flat namespace with prior/`n.` layouts or agent sidecars.
+/// Sidecars use agent subdirectories so envelope id `codex-x` never collides
+/// with the Codex sidecar for id `x`.
 public protocol ResponseTransporting: Sendable {
     func submit(_ response: AgentResponse) async throws
 }

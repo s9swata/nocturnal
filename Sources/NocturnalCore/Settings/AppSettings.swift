@@ -82,6 +82,11 @@ public enum SettingsStoreError: Error, Sendable, Equatable {
 ///
 /// **Load never writes.** Migration of older schemas is applied in-memory only;
 /// callers must invoke ``save(_:)`` explicitly if they want to persist a migration.
+///
+/// **UI contract (required):** never mutate published UI state and then
+/// `try? await save(...)`. A refused save (`newerSchemaOnDisk`) must leave UI
+/// state unchanged. Prefer ``update(_:)`` which applies the mutation only after
+/// a successful write, or catch `SettingsStoreError` and roll back.
 public actor SettingsStore {
     private let paths: PersistencePaths
     private let fileManager: FileManager
@@ -120,7 +125,13 @@ public actor SettingsStore {
         }
     }
 
-    public func save(_ settings: AppSettings) throws {
+    /// Persist settings. Returns the stamped value that was written (and cached).
+    ///
+    /// Callers that mutate on a different isolation domain (e.g. `@MainActor` UI)
+    /// should load → mutate locally → ``save(_:)`` so they never send a non-`Sendable`
+    /// closure into this actor.
+    @discardableResult
+    public func save(_ settings: AppSettings) throws -> AppSettings {
         try paths.ensureDirectories(fileManager: fileManager)
 
         // Refuse to downgrade / rewrite a future schema file.
@@ -147,9 +158,47 @@ public actor SettingsStore {
             try data.write(to: paths.settingsFile, options: [.atomic])
             cached = toSave
             publish(toSave)
+            return toSave
         } catch {
             throw SettingsStoreError.ioFailed(error.localizedDescription)
         }
+    }
+
+    /// Whether ``save(_:)`` would be allowed against the current on-disk file.
+    ///
+    /// Returns `false` when disk carries a newer schema this binary must not rewrite.
+    public func canSave() throws -> Bool {
+        guard let onDiskVersion = try peekOnDiskSchemaVersion() else {
+            return true
+        }
+        return onDiskVersion <= AppSettings.currentSchemaVersion
+    }
+
+    /// Mutate and persist settings atomically from the caller's perspective.
+    ///
+    /// Loads the current value, applies `mutate`, then ``save(_:)``. On any save
+    /// failure (including ``SettingsStoreError/newerSchemaOnDisk``) the in-store
+    /// cache is unchanged and the error is rethrown — so UI can assign the
+    /// returned value only on success.
+    ///
+    /// `mutate` is `@Sendable` because it runs on this actor. Prefer the
+    /// load → local mutate → ``save(_:)`` pattern from `@MainActor` UI code when
+    /// the closure would capture non-Sendable state:
+    ///
+    /// ```swift
+    /// // Same-isolation / Sendable mutate:
+    /// settings = try await settingsStore.update { $0.soundEnabled = true }
+    ///
+    /// // @MainActor UI (do NOT try? after optimistic mutate):
+    /// var next = try await settingsStore.load()
+    /// mutate(&next)
+    /// settings = try await settingsStore.save(next)
+    /// ```
+    @discardableResult
+    public func update(_ mutate: @Sendable (inout AppSettings) -> Void) throws -> AppSettings {
+        var next = try load()
+        mutate(&next)
+        return try save(next)
     }
 
     /// Stream of settings updates (current value first).

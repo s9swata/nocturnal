@@ -25,7 +25,8 @@ public enum CLIArgumentParser: Sendable {
             return .missingValue
         }
         let candidate = args[next]
-        if isFlagToken(candidate) {
+        // Empty tokens (e.g. `--forwarder ""`) are not usable values.
+        if candidate.isEmpty || isFlagToken(candidate) {
             return .missingValue
         }
         return .value(candidate)
@@ -157,6 +158,17 @@ public struct SetupCLIOptions: Sendable, Equatable {
 /// Invalid flag values are recorded in ``warnings`` and ignored so the process
 /// can still fail-open with defaults.
 public struct HookForwarderCLIOptions: Sendable, Equatable {
+    /// Default connect timeout (seconds) when `--timeout` is omitted or invalid.
+    public static let defaultTimeout: TimeInterval = 0.5
+
+    /// Maximum connect timeout (seconds) accepted from CLI.
+    ///
+    /// Downstream `poll` / `setsockopt` paths convert seconds → milliseconds into
+    /// `Int32`. Integer division keeps `maxTimeout * 1000` strictly inside Int32
+    /// (avoids Double rounding that can push `Double(Int32.max - 1) / 1000 * 1000`
+    /// just over the edge).
+    public static let maxTimeout: TimeInterval = Double(Int32.max / 1000)
+
     public var socketPath: String?
     public var wrapSource: AgentSource?
     public var sessionId: String?
@@ -168,7 +180,7 @@ public struct HookForwarderCLIOptions: Sendable, Equatable {
         socketPath: String? = nil,
         wrapSource: AgentSource? = nil,
         sessionId: String? = nil,
-        timeout: TimeInterval = 0.5,
+        timeout: TimeInterval = HookForwarderCLIOptions.defaultTimeout,
         helpRequested: Bool = false,
         warnings: [String] = []
     ) {
@@ -222,15 +234,27 @@ public struct HookForwarderCLIOptions: Sendable, Equatable {
         case .absent:
             break
         case .missingValue:
-            options.warnings.append("missing value for --timeout; using default 0.5s")
+            options.warnings.append("missing value for --timeout; using default \(defaultTimeout)s")
         case .value(let raw):
-            if let value = TimeInterval(raw), value > 0 {
-                options.timeout = value
-            } else {
-                options.warnings.append("invalid --timeout \(raw); using default 0.5s")
-            }
+            options.timeout = sanitizeTimeout(raw, warnings: &options.warnings)
         }
 
         return options
+    }
+
+    /// Parse and clamp a timeout token to a positive finite, Int32-ms-safe range.
+    ///
+    /// Invalid / non-finite / non-positive values fall back to ``defaultTimeout``
+    /// with a warning so the forwarder remains fail-open (always exit 0).
+    public static func sanitizeTimeout(_ raw: String, warnings: inout [String]) -> TimeInterval {
+        guard let value = TimeInterval(raw), value.isFinite, value > 0 else {
+            warnings.append("invalid --timeout \(raw); using default \(defaultTimeout)s")
+            return defaultTimeout
+        }
+        if value > maxTimeout {
+            warnings.append("--timeout \(raw) exceeds max \(maxTimeout)s; capped")
+            return maxTimeout
+        }
+        return value
     }
 }

@@ -270,7 +270,8 @@ public actor SessionStore {
             session.recentEventIDs.removeFirst(session.recentEventIDs.count - recentEventLimit)
         }
 
-        await upsert(session, persist: true)
+        // Stale events may merge metadata but must not reorder the session list.
+        await upsert(session, persist: true, promoteToFront: !isStaleEvent)
         return session
     }
 
@@ -291,7 +292,7 @@ public actor SessionStore {
             session.state = .running
             session.summary = decision.approved ? "Approved" : "Denied"
             session.updatedAt = decision.decidedAt
-            await upsert(session, persist: true)
+            await upsert(session, persist: true, promoteToFront: true)
             return session
         case .question(let answer):
             guard var session = sessionsByID[answer.sessionId] else { return nil }
@@ -302,13 +303,13 @@ public actor SessionStore {
             session.state = .running
             session.summary = "Answered"
             session.updatedAt = answer.answeredAt
-            await upsert(session, persist: true)
+            await upsert(session, persist: true, promoteToFront: true)
             return session
         }
     }
 
     public func upsert(_ session: Session) async {
-        await upsert(session, persist: true)
+        await upsert(session, persist: true, promoteToFront: true)
     }
 
     public func remove(id: SessionID) async {
@@ -372,12 +373,12 @@ public actor SessionStore {
 
     // MARK: - Private
 
-    private func upsert(_ session: Session, persist: Bool) async {
+    private func upsert(_ session: Session, persist: Bool, promoteToFront: Bool) async {
         let isNew = sessionsByID[session.id] == nil
         sessionsByID[session.id] = session
         if isNew {
             order.insert(session.id, at: 0)
-        } else if let idx = order.firstIndex(of: session.id), idx != 0 {
+        } else if promoteToFront, let idx = order.firstIndex(of: session.id), idx != 0 {
             order.remove(at: idx)
             order.insert(session.id, at: 0)
         }
