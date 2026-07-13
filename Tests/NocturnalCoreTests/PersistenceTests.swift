@@ -95,7 +95,7 @@ struct PersistenceTests {
 
         let paths = try TestSupport.makePaths(in: temp)
         let persistence = SessionPersistence(paths: paths)
-        let session = Session(id: SessionID("del-1"), source: .demo, state: .completed, title: "Bye")
+        let session = Session(id: SessionID("del-1"), source: .codex, state: .completed, title: "Bye")
         try await persistence.save(session)
         try await persistence.delete(id: session.id)
         let loaded = try await persistence.load(id: session.id)
@@ -109,16 +109,42 @@ struct PersistenceTests {
         let paths = try TestSupport.makePaths(in: temp)
         let store = SettingsStore(paths: paths)
         var settings = AppSettings.default
-        settings.demoMode = true
         settings.maxVisibleSessions = 7
         settings.soundEnabled = true
+        settings.reduceMotion = true
         try await store.save(settings)
 
         let store2 = SettingsStore(paths: paths)
         let loaded = try await store2.load()
-        #expect(loaded.demoMode)
         #expect(loaded.maxVisibleSessions == 7)
         #expect(loaded.soundEnabled)
+        #expect(loaded.reduceMotion)
+        #expect(loaded.schemaVersion == AppSettings.currentSchemaVersion)
+    }
+
+    /// Old settings JSON with obsolete `demoMode` must still decode without surfacing the key.
+    @Test func settingsDecodeToleratesObsoleteDemoModeKey() throws {
+        let json = Data(
+            #"""
+            {
+              "schemaVersion": 1,
+              "reduceMotion": false,
+              "soundEnabled": true,
+              "demoMode": true,
+              "showFloatingPill": false,
+              "maxVisibleSessions": 9
+            }
+            """#.utf8
+        )
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: json)
+        #expect(decoded.soundEnabled)
+        #expect(decoded.showFloatingPill == false)
+        #expect(decoded.maxVisibleSessions == 9)
+        #expect(decoded.schemaVersion == AppSettings.currentSchemaVersion)
+
+        let encoded = try JSONEncoder().encode(decoded)
+        let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        #expect(object?["demoMode"] == nil)
     }
 
     /// Regression: custom date strategies must not call `decode(Date.self)` (stack overflow / SIGBUS).

@@ -46,10 +46,8 @@ struct RootView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Image(systemName: "moon.stars.fill")
-                .symbolRenderingMode(.hierarchical)
+            BrandOwlMark(size: 18)
                 .foregroundStyle(NocturnalPalette.fgSecondary)
-                .accessibilityHidden(true)
 
             Text("Nocturnal")
                 .font(.headline)
@@ -57,13 +55,13 @@ struct RootView: View {
 
             Spacer()
 
-            Text(model.settings.demoMode ? "Demo" : "Live")
+            Text(model.isSocketRunning ? "Live" : "Idle")
                 .font(.caption.weight(.medium))
                 .foregroundStyle(NocturnalPalette.fgSecondary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(NocturnalPalette.bgHighlight, in: Capsule())
-                .accessibilityLabel(model.settings.demoMode ? "Demo mode" : "Live mode")
+                .accessibilityLabel(model.isSocketRunning ? "Live mode" : "Idle")
         }
         .padding(NocturnalLayout.contentPadding)
     }

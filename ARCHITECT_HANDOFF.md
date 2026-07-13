@@ -58,13 +58,13 @@ Scaffold complete for Nocturnal MVP. Targets compile under Swift 6.2 / macOS 14+
 - `EventEnvelope`, `JSONValue`
 - `ApprovalRequest`, `QuestionPrompt`, `AgentResponse`, `ApprovalDecision`, `QuestionAnswer`
 - `SessionStore`, `SessionStoreSnapshot`, `DecodedEvent`
-- `EventDecoding`, `CompositeEventDecoder`, `CodexEventDecoder`, `ClaudeEventDecoder`, `DemoEventDecoder`
+- `EventDecoding`, `CompositeEventDecoder`, `CodexEventDecoder`, `ClaudeEventDecoder`
 - `SocketPaths`, `EventSocketServer`, `EventSocketClient`
 - `PersistencePaths`, `SessionPersistence`, `SettingsStore`, `AppSettings`
 - `JumpBackCoordinator`, `JumpBackStrategy` (+ concrete strategies)
 - `ResponseTransporting`, `FileResponseTransport`, `InMemoryResponseTransport`
 - `HookForwarding`, `FailOpenHookForwarder`, `HookInstaller`, `HookProduct`
-- `DemoSessions`
+- `OverlayGeometry`
 
 ### Open contracts (core)
 
@@ -101,12 +101,12 @@ Leave **`CORE_HANDOFF.md`** when done.
 | `Views/MenuBarView.swift` | Polish, keyboard, empty/error states |
 | `Overlay/OverlayController.swift` | Notch-aware / top-center pill; non-activating expansion; multi-display |
 
-### Priority 2 — settings & demo
+### Priority 2 — settings & empty state
 
 | File | Work |
 |------|------|
 | `Views/SettingsPlaceholderView.swift` | Match `.impeccable.md` tokens; about/privacy copy |
-| Demo entry points | First-run empty state → demo suggestion |
+| Empty state | First-run empty state → hook setup guidance (no product demo) |
 
 ### Design constraints
 

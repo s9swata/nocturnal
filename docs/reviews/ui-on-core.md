@@ -3,11 +3,12 @@
 - **Reviewer:** nocturnal-ui
 - **Date:** 2026-07-13
 - **Revision / branch:** local workspace after UI MVP
-- **Scope:** public APIs used by `AppModel` — store, socket, settings, demo, transport, jump-back, paths
+- **Scope:** public APIs used by `AppModel` — store, socket, settings, transport, jump-back, paths
+- **Note (historical):** Mentions of product demo seeds / `DemoSessions` below are **no longer applicable**. Demo mode was removed; simulate via fixtures + socket.
 
 ## Summary
 
-Core is shippable for the UI MVP. Snapshot streaming, local response apply, demo isolation, and jump-back coordinator plug in cleanly without the UI needing to own session mutation. A few path/contract nits forced thin workarounds in `AppModel`; none block the shell.
+Core is shippable for the UI MVP. Snapshot streaming, local response apply, and jump-back coordinator plug in cleanly without the UI needing to own session mutation. A few path/contract nits forced thin workarounds in `AppModel`; none block the shell.
 
 **Decision: Approve with nits**
 
@@ -30,8 +31,7 @@ Core is shippable for the UI MVP. Snapshot streaming, local response apply, demo
 - **Attention ordering is UI-side**  
   `SessionStoreSnapshot.sessionsNeedingAttention` filters but the main `sessions` array is recency-ordered. UI re-sorts for display. Optional: `orderedForUI` helper on the snapshot to keep sort policy in one place.
 
-- **Demo seed without pending question**  
-  Built-in demo has approval + running + idle; no `waitingForInput` fixture. Question sheet is implemented but harder to exercise without a custom envelope. Add one demo question session to `DemoSessions.builtInSeedSessions()`.
+- ~~**Demo seed without pending question**~~ — **historical / no longer applicable.** Product demo removed; use Codex/Claude fixtures for question-sheet QA.
 
 - **Jump-back result copy**  
   `JumpBackResult.detail` is good status-line material. No structured error enum — fine for MVP.
@@ -56,17 +56,16 @@ Core is shippable for the UI MVP. Snapshot streaming, local response apply, demo
 
 1. **`SessionStore.snapshots()`** — current snapshot first; simple observe loop for SwiftUI.
 2. **`applyLocalResponse`** — clears pending approval/question without the UI editing maps.
-3. **Demo `autoPersist: false`** — prevents synthetic sessions polluting disk (called out in core review; still correct).
-4. **`AppSettings`** — reduce motion, sound, demo, pill, max visible cover the shell without schema churn.
-5. **`JumpBackCoordinator`** — fail-soft detail string is ideal for a quiet status line.
-6. **Types are `Sendable` value models** — easy to pass into sheets and rows.
+3. **`AppSettings`** — reduce motion, sound, pill, max visible cover the shell (obsolete `demoMode` key ignored on decode).
+4. **`JumpBackCoordinator`** — fail-soft detail string is ideal for a quiet status line.
+5. **Types are `Sendable` value models** — easy to pass into sheets and rows.
 
 ## Open questions
 
 1. Should packaged app set `LSUIElement` and drop the main `Window` scene, or keep the window for support diagnostics?
 2. Will agents grow a reply socket, or remain file-drop only? UI assumes file transport only.
-3. Confirm Codex deep-link scheme so Jump back from demo-less live sessions is reliable.
+3. Confirm Codex deep-link scheme so Jump back from live sessions is reliable.
 
 ## Decision
 
-**Approve with nits** — Core is ready for the UI shell. Address socket-path single-source-of-truth when convenient; add a demo question fixture to unlock QA of the answer sheet without custom NDJSON.
+**Approve with nits** — Core is ready for the UI shell. Address socket-path single-source-of-truth when convenient; exercise answer sheet via Codex/Claude fixtures (not product demo).

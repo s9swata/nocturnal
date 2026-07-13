@@ -14,7 +14,7 @@ Nocturnal is a **local-first** macOS 14+ companion for AI coding agents (Codex, 
 
 | Target | Kind | Responsibility |
 |--------|------|----------------|
-| **NocturnalCore** | Library | Models, `SessionStore` actor, socket bridge, decoders, persistence, jump-back, response transport, hook install helpers, demo fixtures |
+| **NocturnalCore** | Library | Models, `SessionStore` actor, socket bridge, decoders, persistence, jump-back, response transport, hook install helpers |
 | **Nocturnal** | Executable app | SwiftUI shell (`MenuBarExtra`, Settings, window), `@Observable` `AppModel`, AppKit overlay host |
 | **nocturnal-hook-forwarder** | CLI | Fail-open stdin → socket |
 | **nocturnal-setup** | CLI | Idempotent install/uninstall of managed hook sidecars |
@@ -93,9 +93,9 @@ User approvals / answers become JSON under `responses/` (`ResponseFileEnvelope`)
 
 All strategies are fail-soft.
 
-## Demo mode
+## Empty state & simulation
 
-`AppSettings.demoMode` loads deterministic `DemoSessions.seedSessions()` so UI work does not require live agents. Fixtures under `Fixtures/` support CLI simulation (`docs/simulation.md`).
+There is no in-app product demo mode. With zero sessions the UI shows a polished empty state (owl mark, hook setup actions). Exercise live behavior with Codex/Claude NDJSON fixtures over the socket — see `docs/simulation.md` and `Fixtures/{codex,claude}/`.
 
 ## Packaging
 

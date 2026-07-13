@@ -14,16 +14,16 @@ struct OverlayRootView: View {
         Group {
             if model.isOverlayExpanded {
                 ExpandedOverlayPanel(model: model, reduceMotion: reduceMotion)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
             } else {
                 PillView(model: model, reduceMotion: reduceMotion)
                     .transition(reduceMotion ? .opacity : .opacity)
             }
         }
-        .frame(
-            width: model.isOverlayExpanded ? NocturnalLayout.panelWidth : NocturnalLayout.pillWidth,
-            height: model.isOverlayExpanded ? NocturnalLayout.panelHeight : NocturnalLayout.pillHeight
-        )
+        // Fill the hosting view; stay transparent outside capsule / rounded chrome.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Color.clear)
         .animation(NocturnalMotion.expand(reduceMotion: reduceMotion), value: model.isOverlayExpanded)
     }
 }
@@ -51,7 +51,7 @@ private struct ExpandedOverlayPanel: View {
                     RoundedRectangle(cornerRadius: NocturnalLayout.cornerRadiusPanel, style: .continuous)
                         .strokeBorder(NocturnalPalette.borderSubtle.opacity(0.7), lineWidth: 1)
                 )
-                .shadow(color: .black.opacity(0.35), radius: 12, y: 4)
+                .shadow(color: .black.opacity(0.4), radius: 16, y: 6)
         )
         .clipShape(RoundedRectangle(cornerRadius: NocturnalLayout.cornerRadiusPanel, style: .continuous))
         .focusable()
@@ -83,23 +83,12 @@ private struct ExpandedOverlayPanel: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Image(systemName: "moon.stars.fill")
-                .symbolRenderingMode(.hierarchical)
+            BrandOwlMark(size: 15)
                 .foregroundStyle(NocturnalPalette.fgSecondary)
-                .accessibilityHidden(true)
 
             Text("Sessions")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(NocturnalPalette.fgPrimary)
-
-            if model.settings.demoMode {
-                Text("Demo")
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(NocturnalPalette.fgSecondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(NocturnalPalette.bgHighlight, in: Capsule())
-            }
 
             Spacer(minLength: 4)
 

@@ -20,10 +20,10 @@
 ### Follow-up items resolved (this pass)
 
 1. **Core owns `NOCTURNAL_SOCKET`** — `PersistencePaths.resolve()` applies env override; AppModel no longer re-parses env; HookInstaller uses `paths.socketURL`.
-2. **Demo `waitingForInput` session** — built-in + fixture + simulation envelope; answer UI exercisable without NDJSON.
+2. **Question-sheet QA** — exercise via Codex/Claude fixtures + live socket (product demo mode removed).
 3. **UI success copy** — “Recorded approval/denial/answer” (local file-drop; does not claim agent consumed response).
 4. **`.orchestration/` gitignored** — prompt/run logs stay out of product; `.grok/agents` kept.
-5. **Placeholder resource removed** — no `Resources/placeholder.txt`, no SPM resource bundle in packaged app; fixtures still bundled via packaging script.
+5. **Placeholder resource removed** — no `Resources/placeholder.txt`; fixtures still bundled via packaging script.
 
 ---
 
@@ -60,10 +60,9 @@ Exit code **0**.
 | Socket env override | `PersistenceTests/resolveHonorsExplicitSocketOverride` |
 | Socket default under root | `PersistenceTests/resolveDefaultsSocketUnderAppSupportRoot` |
 | Testing isolation | `PersistenceTests/testingHelperIgnoresProcessEnvironment` |
-| Demo question seed | `SessionStoreTests/demoSeedIncludesWaitingForInputQuestion` |
-| Demo determinism (4 sessions) | `SessionStoreTests/demoSeedIsDeterministic` |
 | Replay includes question | `SessionStoreTests/replaySimulationAppliesEnvelopes` |
 | HookInstaller uses Core socket | `HookInstallerTests/resolveHonorsConfigRootEnvironment` |
+| Obsolete settings key | `PersistenceTests/settingsDecodeToleratesObsoleteDemoModeKey` |
 
 Short-path safeguards preserved: `SocketPaths.makeShortTestingRoot`, `SocketPaths.testingSocketPath`, `TestSupport.makeShortSocketRoot` under `/tmp`.
 
@@ -83,14 +82,13 @@ Short-path safeguards preserved: `SocketPaths.makeShortTestingRoot`, `SocketPath
 | Socket path resolution | env override + default + testing helper | Pass |
 | Hook installation temp-only | `HookInstallerTests` | Pass |
 | Response routing | file sidecars, multiplex, e2e | Pass |
-| Demo question session | built-in + fixture + answer local response | Pass |
 | Fail-open forwarder | `JSONValueTests` + socket forwarder test | Pass |
 
 ### Gaps (not automated)
 
 | Gap | Notes |
 |-----|--------|
-| SwiftUI / AppKit UI | No UI test runner under CLT; manual per `UI_HANDOFF` / demo mode |
+| SwiftUI / AppKit UI | No UI test runner under CLT; manual per `UI_HANDOFF` / fixtures |
 | Jump-back strategies | Needs mock openers / NSWorkspace |
 | Native merge golden files | Vendor shapes still evolving |
 | Packaged app launch UI | Not automated; binary + codesign verified |
@@ -144,7 +142,7 @@ Helpers are adhoc-signed as well.
 | Build number | `1` |
 | `LSUIElement` | `true` (`MENU_BAR_APP=1`) |
 | Helpers | `Contents/Resources/Helpers/` + `Contents/MacOS/` |
-| Fixtures | `Contents/Resources/Fixtures/{codex,claude,demo}` (includes question seed) |
+| Fixtures | `Contents/Resources/Fixtures/{codex,claude}` |
 | Placeholder resource | **Removed** (no `placeholder.txt`, no SPM resource bundle) |
 | Arch | arm64 (host) |
 
@@ -154,7 +152,7 @@ Helpers are adhoc-signed as well.
 
 | File | Subject |
 |------|---------|
-| [`docs/reviews/qa-on-core.md`](docs/reviews/qa-on-core.md) | Core — socket single-source + demo question **resolved** |
+| [`docs/reviews/qa-on-core.md`](docs/reviews/qa-on-core.md) | Core — socket single-source **resolved** |
 | [`docs/reviews/qa-on-ui.md`](docs/reviews/qa-on-ui.md) | UI — copy + dual-resolution **resolved** |
 
 ---
@@ -180,7 +178,7 @@ export NOCTURNAL_CONFIG_ROOT=/tmp/nocturnal-setup-test
 ## Known limitations
 
 1. **CLT / Xcode:** Swift Testing works via SPM dependency; system XCTest still unavailable without Xcode.
-2. **UI tests:** None automated (demo mode covers question sheet manually).
+2. **UI tests:** None automated (question sheet exercised via fixtures + socket).
 3. **Socket path length:** Use short paths under `/tmp` for sim and tests (`SocketPaths.makeShortTestingRoot`).
 4. **Adhoc signing only** — not notarized; Gatekeeper may warn on other machines.
 5. **Cold `swift test`** downloads/builds swift-testing + swift-syntax once.
@@ -193,6 +191,6 @@ export NOCTURNAL_CONFIG_ROOT=/tmp/nocturnal-setup-test
 1. Automated tests run and pass (`swift test`) — **yes (50)**
 2. Package script produces `build/Nocturnal.app` — **yes**
 3. `file` + `codesign` verification recorded — **yes**
-4. Bounded follow-ups (socket SSoT, demo question, UI copy, gitignore, placeholder) — **yes**
+4. Bounded follow-ups (socket SSoT, fixtures, UI copy, gitignore, placeholder) — **yes**
 5. `QA_REPORT.md` complete — **yes**
 6. No commit performed — **yes**

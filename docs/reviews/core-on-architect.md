@@ -24,7 +24,7 @@ Architect scaffold was solid and buildable. Core productionized the skeletons wi
 - **Session growth** — no cap/prune/hydrate. Core added `SessionStorePolicy`, prune, disk hydrate, optional auto-persist.
 - **Hook install only sidecar** — architect left native merge open. Core kept sidecar default and added opt-in `--mode merge-native` with backups + dry-run (honest, best-effort).
 - **Forwarder no wrap path** — raw Claude stdin would not match envelope. Core added `EnvelopeNormalizer` + `--wrap-source`.
-- **Demo vs disk** — attaching persistence before demo load could write synthetic sessions. Core disables auto-persist in demo mode via `AppModel`.
+- ~~**Demo vs disk**~~ — **historical / no longer applicable.** Product demo mode removed; no synthetic seed loaders.
 
 ### P2 — nice to have
 

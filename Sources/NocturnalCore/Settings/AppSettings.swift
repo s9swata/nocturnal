@@ -6,22 +6,19 @@ public struct AppSettings: Codable, Sendable, Equatable {
     public var schemaVersion: Int
     /// When true, UI must avoid non-essential motion (also respects system Reduce Motion).
     public var reduceMotion: Bool
-    /// Soft attention sounds for approvals / questions. Off by default for quiet nocturnal feel.
+    /// Soft attention sounds for approvals / questions. Off by default for quiet monochrome feel.
     public var soundEnabled: Bool
-    /// Launch with deterministic demo sessions instead of live socket.
-    public var demoMode: Bool
     /// Show floating pill overlay (in addition to menu bar).
     public var showFloatingPill: Bool
     /// Maximum sessions retained in the panel list.
     public var maxVisibleSessions: Int
 
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
     public static let `default` = AppSettings(
         schemaVersion: currentSchemaVersion,
         reduceMotion: false,
         soundEnabled: false,
-        demoMode: false,
         showFloatingPill: true,
         maxVisibleSessions: 12
     )
@@ -30,14 +27,12 @@ public struct AppSettings: Codable, Sendable, Equatable {
         schemaVersion: Int = AppSettings.currentSchemaVersion,
         reduceMotion: Bool = false,
         soundEnabled: Bool = false,
-        demoMode: Bool = false,
         showFloatingPill: Bool = true,
         maxVisibleSessions: Int = 12
     ) {
         self.schemaVersion = schemaVersion
         self.reduceMotion = reduceMotion
         self.soundEnabled = soundEnabled
-        self.demoMode = demoMode
         self.showFloatingPill = showFloatingPill
         self.maxVisibleSessions = max(1, maxVisibleSessions)
     }
@@ -47,13 +42,22 @@ public struct AppSettings: Codable, Sendable, Equatable {
         schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 0
         reduceMotion = try container.decodeIfPresent(Bool.self, forKey: .reduceMotion) ?? false
         soundEnabled = try container.decodeIfPresent(Bool.self, forKey: .soundEnabled) ?? false
-        demoMode = try container.decodeIfPresent(Bool.self, forKey: .demoMode) ?? false
         showFloatingPill = try container.decodeIfPresent(Bool.self, forKey: .showFloatingPill) ?? true
         maxVisibleSessions = try container.decodeIfPresent(Int.self, forKey: .maxVisibleSessions) ?? 12
+        // Obsolete product key `demoMode` is intentionally ignored (tolerant decode).
         // Migrate forward: stamp current schema after load.
         if schemaVersion < AppSettings.currentSchemaVersion {
             schemaVersion = AppSettings.currentSchemaVersion
         }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case reduceMotion
+        case soundEnabled
+        case showFloatingPill
+        case maxVisibleSessions
+        // demoMode deliberately omitted — old files with the key still decode.
     }
 }
 

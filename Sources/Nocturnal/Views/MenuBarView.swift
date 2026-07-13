@@ -48,24 +48,12 @@ struct MenuBarView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Image(systemName: "moon.stars.fill")
-                .symbolRenderingMode(.hierarchical)
+            BrandOwlMark(size: 16)
                 .foregroundStyle(NocturnalPalette.fgSecondary)
-                .accessibilityHidden(true)
 
             Text("Nocturnal")
                 .font(.headline)
                 .foregroundStyle(NocturnalPalette.fgPrimary)
-
-            if model.settings.demoMode {
-                Text("Demo")
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(NocturnalPalette.fgSecondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(NocturnalPalette.bgHighlight, in: Capsule())
-                    .accessibilityLabel("Demo mode active")
-            }
 
             Spacer(minLength: 4)
 
@@ -95,24 +83,6 @@ struct MenuBarView: View {
                 .animation(NocturnalMotion.standard(reduceMotion: reduceMotion), value: model.statusMessage)
 
             HStack(spacing: 12) {
-                Button(model.settings.demoMode ? "Exit Demo" : "Demo Mode") {
-                    Task { await model.toggleDemoMode() }
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(NocturnalPalette.fgPrimary)
-                .accessibilityLabel(model.settings.demoMode ? "Exit demo mode" : "Enter demo mode")
-
-                if model.settings.demoMode {
-                    Button("Reload") {
-                        Task { await model.reloadDemoFixtures() }
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(NocturnalPalette.fgSecondary)
-                    .accessibilityLabel("Reload demo fixtures")
-                }
-
-                Spacer()
-
                 Button("Settings…") {
                     openSettings()
                 }
@@ -120,6 +90,8 @@ struct MenuBarView: View {
                 .foregroundStyle(NocturnalPalette.fgSecondary)
                 .keyboardShortcut(",", modifiers: .command)
                 .accessibilityLabel("Open settings")
+
+                Spacer()
 
                 Button("Quit") {
                     NSApplication.shared.terminate(nil)

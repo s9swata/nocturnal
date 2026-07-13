@@ -166,39 +166,45 @@ struct SessionStoreTests {
         #expect(updated?.summary == "Answered")
     }
 
-    @Test func demoSeedIsDeterministic() async {
-        let store = SessionStore()
-        await DemoSessions.load(into: store)
-        let sessions = await store.allSessions()
-        #expect(sessions.count == 4)
-        #expect(sessions.map(\.id).contains(DemoSessions.codexSessionID))
-        #expect(sessions.map(\.id).contains(DemoSessions.questionSessionID))
-
-        let store2 = SessionStore()
-        await DemoSessions.load(into: store2)
-        let sessions2 = await store2.allSessions()
-        #expect(sessions.map(\.id) == sessions2.map(\.id))
-        #expect(sessions.map(\.title) == sessions2.map(\.title))
+    @Test func multiSourceSessionsCoexist() async {
+        let store = SessionStore(policy: SessionStorePolicy(autoPersist: false))
+        _ = await store.apply(EventEnvelope(
+            source: .codex,
+            eventType: "session.started",
+            sessionId: "codex-a",
+            payload: ["title": .string("Codex work")]
+        ))
+        _ = await store.apply(EventEnvelope(
+            source: .claude,
+            eventType: "SessionStart",
+            sessionId: "claude-b",
+            payload: ["title": .string("Claude work")]
+        ))
+        let all = await store.allSessions()
+        #expect(all.count == 2)
+        #expect(all.map(\.source).contains(.codex))
+        #expect(all.map(\.source).contains(.claude))
     }
 
-    @Test func demoSeedIncludesWaitingForInputQuestion() async {
-        let builtIn = DemoSessions.builtInSeedSessions()
-        let question = builtIn.first { $0.id == DemoSessions.questionSessionID }
-        #expect(question != nil)
-        #expect(question?.state == .waitingForInput)
-        #expect(question?.pendingQuestion?.id == "demo-prompt-7")
-        #expect(question?.pendingQuestion?.prompt.contains("menu-bar") == true)
-
+    @Test func questionEnvelopeThenLocalAnswer() async {
         let store = SessionStore(policy: SessionStorePolicy(autoPersist: false))
-        await DemoSessions.load(into: store)
-        let loaded = await store.session(id: DemoSessions.questionSessionID)
+        _ = await store.apply(EventEnvelope(
+            source: .codex,
+            eventType: "agent.question",
+            sessionId: "q-live",
+            payload: [
+                "prompt_id": .string("p-live"),
+                "prompt": .string("Ship menu-bar only?"),
+                "title": .string("Clarify scope"),
+            ]
+        ))
+        let loaded = await store.session(id: SessionID("q-live"))
         #expect(loaded?.state == .waitingForInput)
-        #expect(loaded?.pendingQuestion != nil)
+        #expect(loaded?.pendingQuestion?.id == "p-live")
 
-        // Local answer path matches UI sheet without NDJSON simulation.
         let updated = await store.applyLocalResponse(.question(QuestionAnswer(
-            promptId: "demo-prompt-7",
-            sessionId: DemoSessions.questionSessionID,
+            promptId: "p-live",
+            sessionId: SessionID("q-live"),
             text: "Menu-bar only"
         )))
         #expect(updated?.state == .running)
@@ -206,21 +212,11 @@ struct SessionStoreTests {
         #expect(updated?.summary == "Answered")
     }
 
-    @Test func replaySimulationAppliesEnvelopes() async {
-        let store = SessionStore(policy: SessionStorePolicy(autoPersist: false))
-        await DemoSessions.replaySimulation(into: store)
-        let sessions = await store.allSessions()
-        #expect(sessions.isEmpty == false)
-        let question = await store.session(id: DemoSessions.questionSessionID)
-        #expect(question?.state == .waitingForInput)
-        #expect(question?.pendingQuestion?.id == "demo-prompt-7")
-    }
-
     @Test func pruneRespectsMaxSessions() async {
         let store = SessionStore(policy: SessionStorePolicy(maxSessions: 2, autoPersist: false))
         for i in 0..<5 {
             _ = await store.apply(EventEnvelope(
-                source: .demo,
+                source: .codex,
                 eventType: "session.started",
                 sessionId: "cap-\(i)",
                 payload: ["title": .string("S\(i)")]

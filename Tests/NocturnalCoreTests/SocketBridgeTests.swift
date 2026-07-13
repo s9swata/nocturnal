@@ -91,7 +91,7 @@ struct SocketBridgeTests {
         try client.sendRawLine(Data("this is not json".utf8))
 
         let good = EventEnvelope(
-            source: .demo,
+            source: .codex,
             eventType: "session.started",
             sessionId: "after-bad",
             payload: ["title": .string("ok")]

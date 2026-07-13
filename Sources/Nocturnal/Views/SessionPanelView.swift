@@ -91,20 +91,24 @@ struct SessionPanelView: View {
 
 // MARK: - Empty state
 
+/// First-run / no-session surface — owl mark, concise hook copy, working actions.
 struct EmptySessionsView: View {
     @Bindable var model: AppModel
     var style: SessionPanelStyle
+    @Environment(\.openSettings) private var openSettings
+
+    private var isCompact: Bool {
+        style == .menuBar
+    }
 
     var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "moon.zzz")
-                .font(.title2)
-                .symbolRenderingMode(.hierarchical)
+        VStack(spacing: isCompact ? 10 : 14) {
+            BrandOwlMark(size: isCompact ? 28 : 40)
                 .foregroundStyle(NocturnalPalette.fgSecondary)
-                .accessibilityHidden(true)
+                .opacity(0.9)
 
             Text("No sessions yet")
-                .font(.subheadline.weight(.semibold))
+                .font(isCompact ? .subheadline.weight(.semibold) : .headline)
                 .foregroundStyle(NocturnalPalette.fgPrimary)
 
             Text(emptyDescription)
@@ -112,33 +116,65 @@ struct EmptySessionsView: View {
                 .foregroundStyle(NocturnalPalette.fgSecondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: isCompact ? 260 : 360)
 
-            if model.settings.demoMode {
-                Button("Load demo sessions") {
-                    Task { await model.reloadDemoFixtures() }
+            VStack(spacing: 8) {
+                Button {
+                    openSettings()
+                } label: {
+                    Text("Open Settings")
+                        .frame(maxWidth: isCompact ? nil : 200)
                 }
                 .buttonStyle(.bordered)
-                .controlSize(.small)
-                .accessibilityLabel("Load demo sessions")
-            } else {
-                Button("Try demo mode") {
-                    Task { await model.toggleDemoMode() }
+                .controlSize(isCompact ? .small : .regular)
+                .accessibilityLabel("Open settings")
+                .accessibilityHint("Shows hook setup and local paths")
+
+                Button {
+                    model.copySetupCommand()
+                } label: {
+                    Text("Copy setup command")
+                        .frame(maxWidth: isCompact ? nil : 200)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .accessibilityLabel("Enable demo mode")
+                .buttonStyle(.borderedProminent)
+                .tint(NocturnalPalette.fgPrimary)
+                .foregroundStyle(NocturnalPalette.bgBase)
+                .controlSize(isCompact ? .small : .regular)
+                .accessibilityLabel("Copy setup command")
+                .accessibilityHint(model.setupInstallCommand)
+
+                if !isCompact {
+                    Button {
+                        model.revealSetupHelper()
+                    } label: {
+                        Text("Reveal nocturnal-setup")
+                            .frame(maxWidth: 200)
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .foregroundStyle(NocturnalPalette.fgSecondary)
+                    .accessibilityLabel("Reveal nocturnal-setup in Finder")
+                }
+            }
+            .padding(.top, 2)
+
+            if !isCompact {
+                Text(model.setupInstallCommand)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(NocturnalPalette.fgSecondary.opacity(0.85))
+                    .textSelection(.enabled)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 2)
+                    .accessibilityLabel("Setup command: \(model.setupInstallCommand)")
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(NocturnalLayout.contentPadding)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("No sessions. \(emptyDescription)")
     }
 
     private var emptyDescription: String {
-        if model.settings.demoMode {
-            return "Demo fixtures can be reloaded anytime from the menu."
-        }
-        return "Sessions appear when Codex or Claude hooks fire. Install hooks with nocturnal-setup, or try demo mode."
+        "Codex and Claude sessions appear here after hooks are connected."
     }
 }

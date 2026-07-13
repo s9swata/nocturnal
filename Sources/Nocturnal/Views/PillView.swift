@@ -2,6 +2,9 @@ import SwiftUI
 import NocturnalCore
 
 /// Compact top-of-screen indicator. Expands into the session panel on click.
+///
+/// Visual is a **capsule only**: fill, hairline stroke, and soft capsule shadow.
+/// The hosting `NSPanel` must not draw a rectangular window shadow (see OverlayController).
 struct PillView: View {
     @Bindable var model: AppModel
     var reduceMotion: Bool
@@ -18,10 +21,7 @@ struct PillView: View {
                 : "\(attentionCount) need attention"
         }
         if sessionCount == 0 {
-            return model.settings.demoMode ? "Demo · no sessions" : "Quiet"
-        }
-        if model.settings.demoMode {
-            return "Demo · \(sessionCount) session\(sessionCount == 1 ? "" : "s")"
+            return "Quiet"
         }
         return "\(sessionCount) session\(sessionCount == 1 ? "" : "s")"
     }
@@ -31,15 +31,12 @@ struct PillView: View {
             model.setOverlayExpanded(true)
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: "moon.stars.fill")
-                    .font(.system(size: 12, weight: .medium))
-                    .symbolRenderingMode(.hierarchical)
+                BrandOwlMark(size: 13)
                     .foregroundStyle(
                         attentionCount > 0
                             ? NocturnalPalette.accentAttention
                             : NocturnalPalette.fgSecondary
                     )
-                    .accessibilityHidden(true)
 
                 Text("Nocturnal")
                     .font(.caption.weight(.semibold))
@@ -62,18 +59,22 @@ struct PillView: View {
             }
             .padding(.horizontal, 14)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(
+            .background {
                 Capsule(style: .continuous)
                     .fill(NocturnalPalette.pillFill)
                     .overlay(
                         Capsule(style: .continuous)
-                            .strokeBorder(NocturnalPalette.borderSubtle.opacity(0.85), lineWidth: 1)
+                            .strokeBorder(NocturnalPalette.borderSubtle.opacity(0.9), lineWidth: 1)
                     )
-                    .shadow(color: .black.opacity(0.28), radius: 6, y: 2)
-            )
+                    // Capsule-shaped shadow only — not a rectangular window halo.
+                    .shadow(color: Color.black.opacity(0.45), radius: 8, x: 0, y: 3)
+            }
+            .clipShape(Capsule(style: .continuous))
         }
         .buttonStyle(.plain)
         .frame(width: NocturnalLayout.pillWidth, height: NocturnalLayout.pillHeight)
+        // Ensure the hosting view does not paint outside the capsule.
+        .compositingGroup()
         .accessibilityLabel(pillAccessibilityLabel)
         .accessibilityHint("Shows the session panel")
         .onAppear { updateGlow() }
@@ -85,8 +86,6 @@ struct PillView: View {
         var parts = ["Nocturnal", statusLine]
         if model.isSocketRunning {
             parts.append("Listening")
-        } else if model.settings.demoMode {
-            parts.append("Demo mode")
         }
         return parts.joined(separator: ", ")
     }

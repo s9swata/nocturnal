@@ -7,7 +7,7 @@ import NocturnalCore
 /// UI-facing observable façade over ``SessionStore`` and settings.
 ///
 /// Core owns mutation; this type only mirrors snapshots for SwiftUI and
-/// orchestrates overlay / sound / demo lifecycle.
+/// orchestrates overlay / sound lifecycle.
 @MainActor
 @Observable
 final class AppModel {
@@ -73,6 +73,30 @@ final class AppModel {
         return snapshot.sessions.first { $0.id == questionSheetSessionID }
     }
 
+    /// Canonical setup command shown in empty state / settings.
+    var setupInstallCommand: String {
+        "nocturnal-setup install --product all"
+    }
+
+    /// Path to bundled `nocturnal-setup` when packaged; otherwise bare command name.
+    var setupBinaryDisplayPath: String {
+        if let url = Bundle.main.url(
+            forResource: "nocturnal-setup",
+            withExtension: nil,
+            subdirectory: "Helpers"
+        ) {
+            return url.path
+        }
+        if let url = Bundle.main.executableURL?
+            .deletingLastPathComponent()
+            .appendingPathComponent("nocturnal-setup"),
+           FileManager.default.isExecutableFile(atPath: url.path)
+        {
+            return url.path
+        }
+        return "nocturnal-setup"
+    }
+
     init() {
         systemReduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         // Bootstrap asynchronously so `@main` stays light.
@@ -103,26 +127,13 @@ final class AppModel {
             settings = try await settingsStore?.load() ?? .default
             responseTransport = FileResponseTransport(paths: paths)
 
-            if !settings.demoMode {
-                _ = await store.hydrate(from: persistence)
-            }
-
-            if settings.demoMode {
-                // Demo fixtures stay in-memory only — never write synthetic sessions to disk.
-                await store.setPolicy(SessionStorePolicy(autoPersist: false))
-                await DemoSessions.load(into: store)
-                statusMessage = "Demo mode"
-            } else {
-                await store.setPolicy(SessionStorePolicy(autoPersist: true))
-                statusMessage = "Listening…"
-                await startSocket(path: paths.socketURL)
-            }
+            _ = await store.hydrate(from: persistence)
+            await store.setPolicy(SessionStorePolicy(autoPersist: true))
+            statusMessage = "Listening…"
+            await startSocket(path: paths.socketURL)
         } catch {
-            // Fall back to in-memory demo so UI still works.
-            await store.setPolicy(SessionStorePolicy(autoPersist: false))
-            await DemoSessions.load(into: store)
-            settings.demoMode = true
-            statusMessage = "Demo fallback: \(error.localizedDescription)"
+            statusMessage = "Startup error: \(error.localizedDescription)"
+            isSocketRunning = false
         }
 
         observeTask?.cancel()
@@ -140,35 +151,6 @@ final class AppModel {
     }
 
     // MARK: - Session actions
-
-    func toggleDemoMode() async {
-        settings.demoMode.toggle()
-        try? await settingsStore?.save(settings)
-        selectedSessionID = nil
-        dismissSheets()
-
-        if settings.demoMode {
-            await stopSocket()
-            await store.setPolicy(SessionStorePolicy(autoPersist: false))
-            await DemoSessions.load(into: store)
-            statusMessage = "Demo mode"
-        } else if let paths = persistencePaths {
-            await store.setPolicy(SessionStorePolicy(autoPersist: true))
-            await store.reset()
-            if let persistence = sessionPersistence {
-                _ = await store.hydrate(from: persistence)
-            }
-            socketPathDisplay = paths.socketURL.path
-            statusMessage = "Listening…"
-            await startSocket(path: paths.socketURL)
-        }
-        syncOverlayVisibility()
-    }
-
-    func reloadDemoFixtures() async {
-        await DemoSessions.load(into: store)
-        statusMessage = "Demo fixtures reloaded"
-    }
 
     func approve(_ request: ApprovalRequest, approved: Bool) async {
         let decision = ApprovalDecision(
@@ -268,6 +250,44 @@ final class AppModel {
     func dismissSheets() {
         approvalSheetSessionID = nil
         questionSheetSessionID = nil
+    }
+
+    // MARK: - Empty-state / setup helpers (UI orchestration only)
+
+    func copySetupCommand() {
+        copyToPasteboard(setupInstallCommand)
+        noteStatus("Copied setup command")
+    }
+
+    func copySocketPath() {
+        copyToPasteboard(socketPathDisplay)
+        noteStatus("Copied socket path")
+    }
+
+    func revealAppSupport() {
+        revealInFinder(appSupportPathDisplay)
+    }
+
+    func revealSetupHelper() {
+        if let url = Bundle.main.url(
+            forResource: "nocturnal-setup",
+            withExtension: nil,
+            subdirectory: "Helpers"
+        ) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+            noteStatus("Revealed nocturnal-setup")
+            return
+        }
+        let macOSURL = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/MacOS/nocturnal-setup")
+        if FileManager.default.fileExists(atPath: macOSURL.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([macOSURL])
+            noteStatus("Revealed nocturnal-setup")
+            return
+        }
+        // Development run: copy the command so the user can still act.
+        copySetupCommand()
+        noteStatus("Copied setup command (helper not packaged)")
     }
 
     // MARK: - Overlay
@@ -390,6 +410,20 @@ final class AppModel {
                     reduceMotion: self.prefersReducedMotion
                 )
             }
+        }
+    }
+
+    private func copyToPasteboard(_ string: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(string, forType: .string)
+    }
+
+    private func revealInFinder(_ path: String) {
+        let url = URL(fileURLWithPath: path)
+        if FileManager.default.fileExists(atPath: path) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            NSWorkspace.shared.open(url.deletingLastPathComponent())
         }
     }
 }

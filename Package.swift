@@ -30,8 +30,10 @@ let package = Package(
             name: "Nocturnal",
             dependencies: ["NocturnalCore"],
             path: "Sources/Nocturnal",
-            // Fixtures ship via Scripts/package_app.sh into the .app bundle.
-            // No SPM resource bundle required for the menu-bar host.
+            resources: [
+                // Brand marks (owl + app icon source). Packaged .icns is built by package_app.sh.
+                .process("Resources"),
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]

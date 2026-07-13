@@ -24,18 +24,15 @@ public struct EventDecodeMetrics: Sendable, Equatable {
 public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
     private let codex: CodexEventDecoder
     private let claude: ClaudeEventDecoder
-    private let demo: DemoEventDecoder
     private let lock = NSLock()
     private var metrics = EventDecodeMetrics()
 
     public init(
         codex: CodexEventDecoder = CodexEventDecoder(),
-        claude: ClaudeEventDecoder = ClaudeEventDecoder(),
-        demo: DemoEventDecoder = DemoEventDecoder()
+        claude: ClaudeEventDecoder = ClaudeEventDecoder()
     ) {
         self.codex = codex
         self.claude = claude
-        self.demo = demo
     }
 
     public func decode(_ envelope: EventEnvelope) -> DecodedEvent {
@@ -45,10 +42,9 @@ public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
             result = codex.decode(envelope)
         case .claude:
             result = claude.decode(envelope)
-        case .demo:
-            result = demo.decode(envelope)
         case .unknown:
             // Try both; prefer first non-unknown structured decode.
+            // Unrecognized source strings (including obsolete labels) land here.
             let codexResult = codex.decode(envelope)
             if !codexResult.isUnknown {
                 result = codexResult

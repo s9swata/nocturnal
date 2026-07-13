@@ -4,8 +4,6 @@ import Foundation
 public enum AgentSource: String, Codable, Sendable, CaseIterable, Hashable {
     case codex
     case claude
-    /// Synthetic events for demo mode or local simulation.
-    case demo
     /// Unrecognized source string; raw value preserved in envelope metadata.
     case unknown
 
@@ -28,9 +26,8 @@ extension AgentSource {
             self = .codex
         case "claude", "claude-code", "claude_code", "anthropic":
             self = .claude
-        case "demo", "nocturnal-demo":
-            self = .demo
         default:
+            // Including obsolete product labels such as "demo" → unknown.
             self = .unknown
         }
     }
@@ -39,7 +36,6 @@ extension AgentSource {
         switch self {
         case .codex: return "Codex"
         case .claude: return "Claude"
-        case .demo: return "Demo"
         case .unknown: return "Unknown"
         }
     }

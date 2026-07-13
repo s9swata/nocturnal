@@ -17,12 +17,12 @@ struct HookForwarderMain {
                 nocturnal-hook-forwarder — fail-open stdin → Nocturnal socket
 
                 Usage:
-                  nocturnal-hook-forwarder [--socket PATH] [--wrap-source codex|claude|demo]
+                  nocturnal-hook-forwarder [--socket PATH] [--wrap-source codex|claude]
                   echo '{"v":1,...}' | nocturnal-hook-forwarder
 
                 Options:
                   --socket PATH              Unix domain socket path
-                  --wrap-source SOURCE       Wrap non-envelope JSON as EventEnvelope
+                  --wrap-source SOURCE       Wrap non-envelope JSON as EventEnvelope (codex|claude)
                   --session-id ID            Default session id when wrapping
                   --timeout SECONDS          Connect timeout (default 0.5)
                   --help                     Show help
@@ -92,9 +92,8 @@ struct HookForwarderMain {
         switch raw.lowercased() {
         case "codex": return .codex
         case "claude": return .claude
-        case "demo": return .demo
         default:
-            fputs("nocturnal-hook-forwarder: unknown wrap-source \(raw) (ignored)\n", stderr)
+            fputs("nocturnal-hook-forwarder: unknown wrap-source \(raw) (use codex|claude)\n", stderr)
             return nil
         }
     }

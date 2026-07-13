@@ -13,10 +13,10 @@ struct SettingsView: View {
             hooksPane
                 .tabItem { Label("Hooks", systemImage: "link") }
             aboutPane
-                .tabItem { Label("About", systemImage: "moon.stars") }
+                .tabItem { Label("About", systemImage: "info.circle") }
         }
         .frame(minWidth: 420, minHeight: 360)
-        .tint(NocturnalPalette.accentAttention)
+        .tint(NocturnalPalette.fgPrimary)
     }
 
     // MARK: - General
@@ -38,8 +38,6 @@ struct SettingsView: View {
             }
 
             Section("Sessions") {
-                Toggle("Demo mode", isOn: demoBinding)
-                    .help("Load deterministic fixtures instead of the live hook socket.")
                 Toggle("Floating pill", isOn: pillBinding)
                     .help("Show a non-activating pill at the top of the screen.")
                 Stepper(value: maxSessionsBinding, in: 3...40) {
@@ -48,8 +46,8 @@ struct SettingsView: View {
             }
 
             Section("Status") {
-                LabeledContent("Mode") {
-                    Text(model.settings.demoMode ? "Demo" : (model.isSocketRunning ? "Live" : "Idle"))
+                LabeledContent("Socket") {
+                    Text(model.isSocketRunning ? "Live" : "Idle")
                         .foregroundStyle(.secondary)
                 }
                 LabeledContent("Attention") {
@@ -92,10 +90,10 @@ struct SettingsView: View {
 
                 HStack {
                     Button("Copy socket path") {
-                        copyToPasteboard(model.socketPathDisplay)
+                        model.copySocketPath()
                     }
                     Button("Reveal App Support") {
-                        revealInFinder(model.appSupportPathDisplay)
+                        model.revealAppSupport()
                     }
                 }
             } header: {
@@ -114,7 +112,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     commandRow(
                         title: "Install (all products)",
-                        command: "nocturnal-setup install --product all"
+                        command: model.setupInstallCommand
                     )
                     commandRow(
                         title: "Status",
@@ -152,11 +150,7 @@ struct SettingsView: View {
         Form {
             Section {
                 HStack(spacing: 12) {
-                    Image(systemName: "moon.stars.fill")
-                        .font(.largeTitle)
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(NocturnalPalette.fgSecondary)
-                        .accessibilityHidden(true)
+                    BrandAppIcon(size: 48)
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Nocturnal")
                             .font(.title2.weight(.semibold))
@@ -179,7 +173,7 @@ struct SettingsView: View {
             }
 
             Section("Brand") {
-                Text("Quiet nocturnal · native · precise. Warm dark surfaces, calm copy, no neon or urgency theater.")
+                Text("Monochrome owl · native · precise. Black, white, and neutral grays — semantic color only for approvals and failures.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -203,7 +197,9 @@ struct SettingsView: View {
                     .lineLimit(2)
                 Spacer(minLength: 8)
                 Button("Copy") {
-                    copyToPasteboard(command)
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(command, forType: .string)
+                    model.noteStatus("Copied to clipboard")
                 }
                 .buttonStyle(.borderless)
                 .font(.caption)
@@ -217,21 +213,6 @@ struct SettingsView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(title): \(command)")
-    }
-
-    private func copyToPasteboard(_ string: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(string, forType: .string)
-        model.noteStatus("Copied to clipboard")
-    }
-
-    private func revealInFinder(_ path: String) {
-        let url = URL(fileURLWithPath: path)
-        if FileManager.default.fileExists(atPath: path) {
-            NSWorkspace.shared.activateFileViewerSelecting([url])
-        } else {
-            NSWorkspace.shared.open(url.deletingLastPathComponent())
-        }
     }
 
     // MARK: - Bindings
@@ -250,15 +231,6 @@ struct SettingsView: View {
             get: { model.settings.soundEnabled },
             set: { value in
                 Task { await model.updateSettings { $0.soundEnabled = value } }
-            }
-        )
-    }
-
-    private var demoBinding: Binding<Bool> {
-        Binding(
-            get: { model.settings.demoMode },
-            set: { _ in
-                Task { await model.toggleDemoMode() }
             }
         )
     }

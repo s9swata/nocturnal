@@ -18,8 +18,8 @@
 | `FailOpenHookForwarder` + CLI | Always exit 0; `--wrap-source`; connect timeout |
 | `ResponseTransport` | File + agent sidecars + in-memory + multiplex |
 | `JumpBackCoordinator` | Codex / Cursor / VS Code / Ghostty / iTerm2 / Terminal / Finder; AppleScript tab focus; fail-soft reasons |
-| Demo | `DemoSessions` + fixture file discovery |
 | CLIs | Setup install/uninstall/status + `--mode` + `--dry-run`; forwarder flags for simulation |
+| Settings | `AppSettings` schema v2 — no product `demoMode` (obsolete key ignored on decode) |
 
 ---
 
@@ -64,7 +64,6 @@ let snap = await store.currentSnapshot()
 | Live event | `await store.apply(envelope)` |
 | Approve / deny | write via `ResponseTransporting.submit(.approval)` then `await store.applyLocalResponse(...)` |
 | Answer question | same with `.question` |
-| Demo load | `await DemoSessions.load(into: store)` with `SessionStorePolicy(autoPersist: false)` |
 | Jump back | `JumpBackCoordinator().jump(using: session.jumpBack ?? JumpBackContext(workingDirectory: session.workingDirectory))` |
 | Settings | `SettingsStore.load()` / `save(_:)` |
 
@@ -99,7 +98,6 @@ Unknown events: `DecodedEvent.isUnknown == true`, metadata preserved, **no crash
 | Decode | inject `EventDecoding` into `SessionStore` |
 | Jump-back | inject `[any JumpBackStrategy]` into `JumpBackCoordinator` |
 | Forwarder | `FailOpenHookForwarder(options:)` — no process spawn required |
-| Demo | `DemoSessions.seedSessions()` / `replaySimulation(into:)` |
 | Socket diagnostics | `await server.currentDiagnostics()` |
 | Decode metrics | `CompositeEventDecoder.currentMetrics()` |
 

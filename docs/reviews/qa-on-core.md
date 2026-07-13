@@ -3,11 +3,12 @@
 - **Reviewer:** nocturnal-qa
 - **Date:** 2026-07-13 (updated after follow-up cleanup)
 - **Revision / branch:** local workspace after QA follow-up
-- **Scope:** decode, store, socket, persistence, hooks, response transport, demo seeds, test seams
+- **Scope:** decode, store, socket, persistence, hooks, response transport, test seams
+- **Note (historical):** Sections below that mention product “demo seeds” / `DemoSessions` are **no longer applicable**. Product demo mode was removed; use Codex/Claude fixtures + socket simulation instead.
 
 ## Summary
 
-Core is production-capable for the MVP surface. Public test seams remain real and green under CLT. P0 date-decoder crash was fixed earlier; follow-up closed the socket dual-resolution nit and added a deterministic demo question session.
+Core is production-capable for the MVP surface. Public test seams remain real and green under CLT. P0 date-decoder crash was fixed earlier; follow-up closed the socket dual-resolution nit.
 
 **Decision: Approve**
 
@@ -35,11 +36,9 @@ Core is production-capable for the MVP surface. Public test seams remain real an
 - Forwarder CLI process exit-0 is manual; library path covered.
 - Envelope schema “reject / migrate v2” tests not yet present.
 
-### Demo / fixtures
+### Fixtures / simulation (historical note)
 
-- **[FIXED this pass] `waitingForInput` demo session**  
-  `DemoSessions.questionSessionID` / built-in seed + `Fixtures/demo/seed-sessions.json` + simulation envelope.  
-  Tests: `demoSeedIncludesWaitingForInputQuestion`, updated `demoSeedIsDeterministic` (4 sessions), `replaySimulationAppliesEnvelopes`.
+- ~~Product demo question seed / `DemoSessions`~~ — **removed from product**. Exercise `waitingForInput` via Codex/Claude NDJSON fixtures over the live socket (`docs/simulation.md`).
 
 ## Coverage map (automated)
 
@@ -54,7 +53,6 @@ Core is production-capable for the MVP surface. Public test seams remain real an
 | Persistence load/save/corrupt | Pass | quarantine dir asserted |
 | Hook install temp-only | Pass | `configRoot` under temp; env resolve → Core socket |
 | Response routing | Pass | file + sidecars + multiplex + e2e clear pending |
-| Demo question seed | Pass | waitingForInput + local answer |
 
 ## Contract checklist
 
@@ -74,4 +72,4 @@ Core is production-capable for the MVP surface. Public test seams remain real an
 
 ## Decision
 
-**Approve** — follow-up nits (socket SSoT, demo question) landed with tests. Remaining items are P2 / product policy.
+**Approve** — follow-up nits (socket SSoT) landed with tests. Remaining items are P2 / product policy.

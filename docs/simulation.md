@@ -1,6 +1,6 @@
 # Simulation
 
-Exercise Nocturnal without real Codex/Claude sessions.
+Exercise Nocturnal without real Codex/Claude interactive sessions by feeding NDJSON fixtures into the live socket.
 
 ## Prerequisites
 
@@ -18,21 +18,11 @@ BIN=".build/debug"
 BIN=$(echo .build/*-apple-macosx/debug)
 ```
 
-## 1. Demo mode (UI only)
+## Live socket + NDJSON fixtures
 
-1. Launch the app (`swift run Nocturnal` or packaged `.app`).
-2. Open the menu bar extra → **Demo Mode**.
-3. Deterministic sessions from `DemoSessions.seedSessions()` appear, including:
-   - running Codex-style session
-   - idle Claude-style session
-   - `waitingForApproval` (approve/deny sheet)
-   - `waitingForInput` (question sheet — exercise answer UI without NDJSON)
+There is **no in-app product demo mode**. Empty UI is expected until hooks or fixtures deliver sessions.
 
-No socket required.
-
-## 2. Live socket + NDJSON fixtures
-
-Terminal A — run the app (live mode, demo off):
+Terminal A — run the app:
 
 ```bash
 swift run Nocturnal
@@ -50,103 +40,28 @@ Override for isolation:
 export NOCTURNAL_SOCKET="/tmp/nocturnal-sim.sock"
 export NOCTURNAL_APP_SUPPORT="/tmp/nocturnal-sim-data"
 mkdir -p "$NOCTURNAL_APP_SUPPORT"
+
+# Terminal A
 swift run Nocturnal
+
+# Terminal B
+BIN=.build/debug   # or .build/*-apple-macosx/debug
+cat Fixtures/codex/session-started.ndjson | "$BIN/nocturnal-hook-forwarder"
+cat Fixtures/codex/approval-required.ndjson | "$BIN/nocturnal-hook-forwarder"
+cat Fixtures/claude/session-lifecycle.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source claude
 ```
 
-Terminal B — forward fixture lines:
+## Question / answer path
+
+Feed a Codex-style `agent.question` envelope (or extend fixtures) then use the Answer sheet in the UI. Local response files land under Application Support `responses/`.
+
+## Packaged app
 
 ```bash
-export NOCTURNAL_SOCKET="/tmp/nocturnal-sim.sock"   # match Terminal A
-
-cat Fixtures/codex/session-started.ndjson \
-  | "$BIN/nocturnal-hook-forwarder"
-
-cat Fixtures/codex/approval-required.ndjson \
-  | "$BIN/nocturnal-hook-forwarder"
-
-cat Fixtures/claude/session-lifecycle.ndjson \
-  | "$BIN/nocturnal-hook-forwarder"
-
-# Unknown event (should not crash; metadata only)
-cat Fixtures/codex/unknown-event.ndjson \
-  | "$BIN/nocturnal-hook-forwarder"
+Scripts/package_app.sh
+export NOCTURNAL_SOCKET="/tmp/nocturnal-sim.sock"
+open build/Nocturnal.app
+# then pipe fixtures through build/Nocturnal.app/Contents/MacOS/nocturnal-hook-forwarder
 ```
 
-Fail-open check (app stopped):
-
-```bash
-echo '{"v":1,"id":"00000000-0000-4000-8000-0000000000aa","source":"demo","eventType":"session.started","sessionId":"x","timestamp":"2023-11-14T22:13:20Z","payload":{},"raw":{}}' \
-  | "$BIN/nocturnal-hook-forwarder"
-echo "exit=$?"   # must be 0
-```
-
-## 3. Setup CLI (sandboxed)
-
-**Never point tests at your real home.** Use a temp config root:
-
-```bash
-export NOCTURNAL_CONFIG_ROOT="/tmp/nocturnal-setup-test"
-export NOCTURNAL_APP_SUPPORT="/tmp/nocturnal-setup-test/app-support"
-export NOCTURNAL_SOCKET="/tmp/nocturnal-setup-test/ipc.sock"
-mkdir -p "$NOCTURNAL_CONFIG_ROOT" "$NOCTURNAL_APP_SUPPORT"
-
-"$BIN/nocturnal-setup" install --product all \
-  --forwarder "$BIN/nocturnal-hook-forwarder"
-
-"$BIN/nocturnal-setup" status --product codex
-"$BIN/nocturnal-setup" uninstall --product claude
-
-# Dry-run native merge (no product config writes)
-"$BIN/nocturnal-setup" install --product all --mode merge-native --dry-run \
-  --forwarder "$BIN/nocturnal-hook-forwarder"
-```
-
-Inspect:
-
-```bash
-find "$NOCTURNAL_CONFIG_ROOT" -type f
-find "$NOCTURNAL_APP_SUPPORT/backups" -type f 2>/dev/null || true
-```
-
-### Raw Claude stdin wrap
-
-```bash
-echo '{"hook_event_name":"SessionStart","session_id":"raw-1","cwd":"/tmp"}' \
-  | "$BIN/nocturnal-hook-forwarder" --wrap-source claude
-```
-
-## 4. Unit-level simulation (no UI)
-
-```bash
-swift test
-# equivalent helper
-Scripts/run_tests.sh
-```
-
-Swift Testing is provided via SPM (`apple/swift-testing`) so this works under
-**Command Line Tools only** (no full Xcode / system XCTest required).
-
-`DemoSessions.replaySimulation(into:)` applies deterministic envelopes inside tests.
-
-Covered automatically:
-
-| Area | Suite |
-|------|--------|
-| Codex / Claude / unknown decode | `EventDecodingTests` |
-| State transitions + local responses | `SessionStoreTests` |
-| Socket NDJSON round-trip | `SocketBridgeTests` (short `/tmp` paths) |
-| Persistence + corruption quarantine | `PersistenceTests` |
-| Hook install in temp roots only | `HookInstallerTests` |
-| Response file routing | `ResponseRoutingTests` |
-
-**Never** set `NOCTURNAL_CONFIG_ROOT` to your real home during tests.
-
-## 5. Packaged app helpers
-
-After `Scripts/package_app.sh`:
-
-```bash
-APP=build/Nocturnal.app
-"$APP/Contents/Resources/Helpers/nocturnal-setup" status --product all
-cat Fixtures/demo/seed-sessions.json >/dev/null  # also copied into Resources/Fixtures
-```
+Fixtures shipped in the app: `Contents/Resources/Fixtures/{codex,claude}/`.

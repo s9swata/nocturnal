@@ -1,6 +1,6 @@
 # Hook Schemas
 
-Integration realism: **only listed event types are structurally decoded**.  
+Integration realism: **only listed event types are structurally decoded**.
 Unknown types never crash; they update `Session.rawMetadata` and may set a summary hint.
 
 Wire format for every line: `EventEnvelope` (see `Sources/NocturnalCore/Models/EventEnvelope.swift`).
@@ -11,7 +11,7 @@ Wire format for every line: `EventEnvelope` (see `Sources/NocturnalCore/Models/E
 |-------|------|--------|
 | `v` | Int | Schema version; current `1` |
 | `id` | UUID string | Unique event id (invalid/missing → generated) |
-| `source` | `codex` \| `claude` \| `demo` \| `unknown` | Unknown raw strings decode as `unknown` + optional `sourceRaw` |
+| `source` | `codex` \| `claude` \| `unknown` | Unknown raw strings (including obsolete labels) decode as `unknown` + optional `sourceRaw` |
 | `eventType` | String | Upstream or normalized name |
 | `sessionId` | String | Groups events into one `Session` |
 | `timestamp` | ISO-8601 | Fractional seconds accepted |
@@ -25,7 +25,7 @@ Resilient decode: bad dates/ids never crash the socket server; bad lines are dro
 
 ## Codex — implemented
 
-Decoder: `CodexEventDecoder`  
+Decoder: `CodexEventDecoder`
 Set: `CodexEventDecoder.implementedEventTypes`
 
 | eventType | Normalized state | Notes |
@@ -75,7 +75,7 @@ Any other `eventType` (streaming tokens, file diffs, MCP internals, future exper
 
 ## Claude Code — implemented
 
-Decoder: `ClaudeEventDecoder`  
+Decoder: `ClaudeEventDecoder`
 Set: `ClaudeEventDecoder.implementedEventTypes`
 
 | eventType | Normalized state | Notes |
@@ -113,18 +113,14 @@ Until vendor shapes stabilize, treat this as best-effort. Unknown objects still 
 
 ### Claude — not implemented (examples)
 
-- Permission modes not expressed as PreToolUse + permission flags  
-- Any event type outside the set above  
+- Permission modes not expressed as PreToolUse + permission flags
+- Any event type outside the set above
 
 ---
 
-## Demo / simulation
+## Simulation
 
-`source: demo` uses `DemoEventDecoder` (Codex-normalized types + optional `payload.state`).
-
-See `Fixtures/` and `docs/simulation.md`.
-
-`DemoSessions.seedSessions()` prefers `Fixtures/demo/seed-sessions.json` when discoverable, else built-in deterministic seeds.
+Use Codex and Claude fixtures under `Fixtures/` with the live socket (see `docs/simulation.md`).
 
 ---
 
@@ -132,11 +128,11 @@ See `Fixtures/` and `docs/simulation.md`.
 
 `nocturnal-hook-forwarder`:
 
-1. Reads stdin (full or line-split; single object without trailing newline is one line)  
-2. Optional `--wrap-source codex|claude|demo` runs `EnvelopeNormalizer`  
-3. Attempts connect (default 0.5s timeout) + write to socket  
-4. **Always exits 0**  
-5. Optional debug: `NOCTURNAL_FORWARDER_DEBUG=1`  
+1. Reads stdin (full or line-split; single object without trailing newline is one line)
+2. Optional `--wrap-source codex|claude` runs `EnvelopeNormalizer`
+3. Attempts connect (default 0.5s timeout) + write to socket
+4. **Always exits 0**
+5. Optional debug: `NOCTURNAL_FORWARDER_DEBUG=1`
 
 Agents must not block on Nocturnal availability.
 

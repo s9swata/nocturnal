@@ -5,7 +5,7 @@ Local-first macOS companion for AI coding agents (Codex & Claude Code).
 - Free, offline, no accounts or telemetry  
 - Menu bar + optional floating pill  
 - Fail-open hooks over a Unix domain socket  
-- Quiet nocturnal UI (see `.impeccable.md`)
+- Monochrome owl UI (see `.impeccable.md`)
 
 ## Requirements
 
@@ -58,8 +58,10 @@ The package script:
 
 - Builds **Nocturnal**, **nocturnal-hook-forwarder**, and **nocturnal-setup**
 - Emits **`build/Nocturnal.app`** with `LSUIElement` (menu bar companion)
+- Generates **`Icon.icns`** from `Assets/Brand/nocturnal-app-icon.png` (`CFBundleIconFile`)
+- Copies brand marks to `Contents/Resources/Brand/`
 - Copies helpers to `Contents/Resources/Helpers/` and `Contents/MacOS/`
-- Bundles `Fixtures/` for offline demo/simulation
+- Bundles `Fixtures/{codex,claude}/` for offline simulation
 - Ad-hoc signs the bundle (`codesign --sign -`)
 
 Verify:
@@ -67,13 +69,15 @@ Verify:
 ```bash
 file build/Nocturnal.app/Contents/MacOS/Nocturnal
 codesign -dv --verbose=4 build/Nocturnal.app
+plutil -p build/Nocturnal.app/Contents/Info.plist | head
+ls build/Nocturnal.app/Contents/Resources/{Icon.icns,Brand}
 ```
 
-## Demo mode
+## First launch (no sessions)
 
-1. Launch Nocturnal  
-2. Menu bar → **Demo Mode**  
-3. Deterministic sample sessions appear (no agents required)
+With hooks not yet installed, the menu bar / pill / window show a calm empty state: owl mark, short copy that Codex and Claude sessions appear after hooks connect, and actions to open Settings or copy/reveal `nocturnal-setup install --product all`.
+
+There is **no product demo mode**.
 
 ## Simulation (hooks without real agents)
 

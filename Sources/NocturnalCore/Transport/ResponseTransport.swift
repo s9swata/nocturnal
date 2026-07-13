@@ -142,7 +142,7 @@ public enum ResponseFileEnvelope: Codable, Sendable, Equatable {
     }
 }
 
-/// In-memory transport for tests and demo mode.
+/// In-memory transport for unit tests.
 public actor InMemoryResponseTransport: ResponseTransporting {
     public private(set) var submitted: [AgentResponse] = []
 

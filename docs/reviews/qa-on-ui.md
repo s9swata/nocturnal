@@ -22,11 +22,11 @@ UI shell builds, packages as `LSUIElement` companion, and keeps session mutation
 - **[FIXED this pass] Socket path dual-resolution**  
   `AppModel` now uses `PersistencePaths.resolve().socketURL` only (no private `resolvedSocketURL` / env re-parse). Settings path display and live listen path share Core resolution.
 
-- **No automated UI regression suite** — still true; approve/answer/demo/reduce-motion remain manual. Acceptable for MVP.
+- **No automated UI regression suite** — still true; approve/answer/reduce-motion remain manual. Acceptable for MVP.
 
 ### P2 — nice to have
 
-- **[FIXED this pass] Demo `waitingForInput` session** — Core demo seed includes question session; answer sheet exercisable without NDJSON.
+- ~~**Demo `waitingForInput` session**~~ — **historical / no longer applicable.** Product demo removed; use fixtures + socket.
 - **[FIXED this pass] Status copy honesty** — UI now reports “Recorded approval”, “Recorded denial”, “Recorded answer” (local file-drop), not “agent consumed”.
 - Main `Window` always registered — fine for `swift run`; packaged LSUIElement hides Dock.
 - Non-activating panel keyboard focus — known limit; not a ship blocker.
@@ -43,7 +43,7 @@ UI shell builds, packages as `LSUIElement` companion, and keeps session mutation
 | `Scripts/package_app.sh` | exit 0 → `build/Nocturnal.app` |
 | `file` main binary | Mach-O 64-bit executable arm64 |
 | Helpers present | `Contents/Resources/Helpers/{nocturnal-hook-forwarder,nocturnal-setup}` |
-| Fixtures bundled | `Resources/Fixtures/{codex,claude,demo}` incl. question seed |
+| Fixtures bundled | `Resources/Fixtures/{codex,claude}` |
 | Placeholder | **absent** |
 | `LSUIElement` | `true` (`MENU_BAR_APP=1` default) |
 | `codesign -dv` | adhoc signature on app + helpers |
@@ -54,7 +54,6 @@ UI shell builds, packages as `LSUIElement` companion, and keeps session mutation
 
 - Design tokens follow quiet nocturnal palette (no neon / glass island chrome observed).
 - `@Observable` façade only; `approve` / `answer` go through `ResponseTransporting` + `store.applyLocalResponse`.
-- Demo uses `SessionStorePolicy(autoPersist: false)` — correct isolation.
 - Status messages no longer imply external agent consumption of responses.
 
 ## Contract checklist

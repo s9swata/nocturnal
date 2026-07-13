@@ -22,7 +22,8 @@ struct SessionStateTests {
         ("Codex", AgentSource.codex),
         ("Claude-Code", AgentSource.claude),
         ("claude", AgentSource.claude),
-        ("demo", AgentSource.demo),
+        ("demo", AgentSource.unknown),
+        ("nocturnal-demo", AgentSource.unknown),
         ("something-else", AgentSource.unknown),
     ])
     func agentSourceParsing(raw: String, expected: AgentSource) {

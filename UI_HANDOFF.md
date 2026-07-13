@@ -1,8 +1,8 @@
-# UI_HANDOFF — NocturnalApp shell MVP
+# UI_HANDOFF — NocturnalApp shell
 
 **Author:** nocturnal-ui  
 **Date:** 2026-07-13  
-**Status:** Production UI MVP implemented; `swift build` clean.
+**Status:** Monochrome owl brand + full demo purge + packaging allow-list; `swift build` / package clean.
 
 ---
 
@@ -10,16 +10,19 @@
 
 | Surface | Status |
 |---------|--------|
-| Floating pill (notch-aware / top-center) | AppKit `NSPanel` non-activating overlay |
-| Expandable session panel | Same panel resizes; SwiftUI list + actions |
+| Floating pill (notch-aware / top-center) | AppKit `NSPanel` non-activating; **capsule-only** chrome (no rect shadow) |
+| Expandable session panel | ~520×620 ideal, clamped to visible screen |
 | Session list | Stable `Session.id`, attention-first sort, state badges |
 | Approval / question actions | Wired to `ResponseTransport` + `SessionStore.applyLocalResponse` |
 | Settings window | Quiet, sessions, hooks/paths, about/privacy |
-| MenuBarExtra | Sessions, demo, settings, quit |
+| MenuBarExtra | Template owl mark; sessions; settings; quit |
+| Empty state | Owl mark + setup actions (Settings, copy command, reveal helper) |
 | Keyboard navigation | ↑/↓ select; A/D approve/deny; app menu commands |
 | Accessibility | Labels, combined rows, VO actions, status live text |
 | Reduced motion | `AppSettings.reduceMotion` ∪ system Reduce Motion |
-| Demo mode | First-class empty state + reload; no disk writes |
+| Brand assets | SPM `Resources/Brand` + packaged `.icns`; runtime `applicationIconImage` |
+
+**Removed:** product demo mode entirely (`AgentSource.demo`, settings, menus, seeds, CTAs). Obsolete `demoMode` settings key still ignored on decode.
 
 ---
 
@@ -27,7 +30,7 @@
 
 | Scene | ID / entry | Content |
 |-------|------------|---------|
-| `MenuBarExtra` | system image `moon.stars.fill`, `.window` style | `MenuBarView` → `SessionPanelView` |
+| `MenuBarExtra` | template owl mark, `.window` style | `MenuBarView` → `SessionPanelView` |
 | `Settings` | system Settings (⌘,) | `SettingsView` (General / Hooks / About tabs) |
 | `Window` | `"main"` | `RootView` — dev / non-agent status window |
 | Overlay (AppKit) | not a SwiftUI `Scene` | `OverlayController` hosts `OverlayRootView` → `PillView` / expanded panel |
@@ -40,22 +43,26 @@ Companion policy: menu bar is primary; floating pill is optional (`showFloatingP
 
 ```
 Sources/Nocturnal/
-  NocturnalApp.swift          # Scenes + Commands
+  NocturnalApp.swift          # Scenes + Commands + menu bar label + app icon
   AppModel.swift              # @Observable façade → Core
   Design/
-    DesignTokens.swift        # Palette, layout, motion
+    DesignTokens.swift        # Monochrome palette; layout sizes from OverlayGeometry
+    BrandAssets.swift         # Owl mark / app icon loading + views
     SessionPresentation.swift # Badges, sort, a11y labels
   Overlay/
-    OverlayController.swift   # Non-activating NSPanel, geometry
+    OverlayController.swift   # Non-activating NSPanel; uses Core OverlayGeometry
   Views/
     OverlayRootView.swift     # Pill ↔ expanded host content
     PillView.swift
     SessionPanelView.swift    # List + empty + sheets
-    SessionRowView.swift      # Row, badge, actions
-    ApprovalSheet.swift       # Approval + Question sheets
+    SessionRowView.swift
+    ApprovalSheet.swift
     MenuBarView.swift
     SettingsView.swift
     RootView.swift
+  Resources/Brand/
+    nocturnal-owl-mark.png
+    nocturnal-app-icon.png
 ```
 
 ---
@@ -64,14 +71,14 @@ Sources/Nocturnal/
 
 | Concern | API |
 |---------|-----|
-| Bootstrap | `PersistencePaths.resolve()`, `SessionPersistence`, `SettingsStore`, hydrate / demo |
+| Bootstrap | `PersistencePaths.resolve()`, `SessionPersistence`, `SettingsStore`, hydrate + socket |
 | Observation | `await store.snapshots()` → `snapshot` |
-| Live events | `EventSocketServer` on resolved socket (`NOCTURNAL_SOCKET` or paths) |
+| Live events | `EventSocketServer` on resolved socket |
 | Approve / deny | `FileResponseTransport.submit(.approval)` + `store.applyLocalResponse` |
 | Answer | same with `.question` |
-| Demo | `SessionStorePolicy(autoPersist: false)` + `DemoSessions.load` |
 | Jump back | `JumpBackCoordinator().jump(using:)` |
 | Settings | `SettingsStore.save` |
+| Empty-state actions | `copySetupCommand`, `revealSetupHelper`, `openSettings` (env) |
 
 UI **never** mutates session maps directly.
 
@@ -81,32 +88,23 @@ UI **never** mutates session maps directly.
 - Approval / question sheet session ids
 - Mirrored `snapshot`, `settings`, `statusMessage`, path displays
 
-### Derived lists
-
-```swift
-visibleSessions // attention-first, then updatedAt, capped by maxVisibleSessions
-attentionCount  // snapshot.sessionsNeedingAttention.count
-prefersReducedMotion // settings ∪ system
-```
-
 ---
 
 ## Accessibility coverage
 
 | Control / region | Coverage |
 |------------------|----------|
-| Pill | Label with mode/count; hint to expand |
+| Pill | Label with count/listening; hint to expand |
 | Expanded panel | Container label; Escape collapses |
 | Session rows | Combined title + state + source + summary; selected trait |
 | Approve / Deny | Button labels; VO actions on row |
+| Empty state | Container label; working Settings / copy / reveal buttons |
 | Jump back | Button + VO action |
 | Answer sheet | Focused field; Send disabled when empty |
 | Approval sheet | Default focus on Approve; risk/summary/detail labeled |
 | Status line | `Status: …` accessibility label (menu, window, overlay) |
 | Settings | Sectioned forms; copy commands labeled |
-| Keyboard | ↑/↓ in menu/overlay/window; A/D approve/deny; ⌘⌥A / ⌘⌥D; ⌘J/K select; ⌘⇧P expand pill; Escape collapse |
-
-Dynamic Type: system text styles (`.headline`, `.subheadline`, `.caption`, `.caption2`) — no fixed primary font sizes.
+| Keyboard | ↑/↓; A/D; ⌘⌥A / ⌘⌥D; ⌘J/K; ⌘⇧P expand pill; Escape collapse |
 
 ---
 
@@ -114,7 +112,7 @@ Dynamic Type: system text styles (`.headline`, `.subheadline`, `.caption`, `.cap
 
 - Expand/collapse ≈ 0.22s ease-in-out (AppKit frame + SwiftUI opacity)
 - Status / selection: 0.2s when motion allowed
-- Attention glow: single soft breath on pill when count > 0
+- Attention glow: soft breath on pill when count > 0
 - When reduced motion: instant frame changes, opacity-only transitions, no breath loop
 
 ---
@@ -123,10 +121,22 @@ Dynamic Type: system text styles (`.headline`, `.subheadline`, `.caption`, `.cap
 
 Follows `.impeccable.md`:
 
-- Warm near-black base / elevated charcoal
-- Soft amber attention (not alarm red by default)
-- No neon, cyan/purple gradients, glassmorphism, or island-copy chrome
-- SF Symbol `moon.stars.fill` interim mark
+- Vercel-inspired monochrome (black / white / neutral grays)
+- Semantic amber/red/green only for approval / failure / success
+- Owl mark template in menu bar; full-bleed icon → `Icon.icns`
+- Runtime: `NocturnalAppDelegate` sets `NSApplication.shared.applicationIconImage` from `BrandAssets.appIconNSImage` (covers `swift run`)
+- Packaging: `package_app.sh` copies **only** `nocturnal-app-icon.png` + `nocturnal-owl-mark.png` into `Resources/Brand` (no working chroma files)
+- No neon, gradients, glassmorphism, or rectangular pill chrome
+
+---
+
+## Compact pill chrome fix
+
+See `docs/reviews/vercel-ui-refresh.md`.
+
+**Root cause:** `NSPanel.hasShadow = true` draws a rectangular system shadow around the content rect; any opaque hosting fill compounds the “square margin” look.
+
+**Fix:** clear non-opaque panel, `hasShadow = false`, clear `NSHostingView` layer, SwiftUI capsule fill + capsule shadow only.
 
 ---
 
@@ -134,38 +144,20 @@ Follows `.impeccable.md`:
 
 ```bash
 swift build
+swift test
 swift run Nocturnal
-# optional simulation env
-export NOCTURNAL_APP_SUPPORT=/tmp/nocturnal-ui-test
-export NOCTURNAL_SOCKET=/tmp/nocturnal-ui-test/ipc.sock
+Scripts/package_app.sh
+open build/Nocturnal.app
 ```
 
 Settings → Hooks shows paths and copy-ready `nocturnal-setup` / forwarder commands.
-
-Packaged app: `Scripts/package_app.sh` → `build/Nocturnal.app` (architect-owned).
 
 ---
 
 ## Known limits / follow-ups
 
-1. **Non-activating panel keyboard** — key focus works best once the expanded panel is clicked; full global hotkeys would need an event tap (out of scope).
-2. **Main window** always registered — packaging may hide Dock icon via `LSUIElement`; window remains useful for `swift run`.
+1. **Non-activating panel keyboard** — key focus works best once the expanded panel is clicked.
+2. **Main window** always registered — packaging may hide Dock icon via `LSUIElement`.
 3. **Sound** uses system `Tink` only when `soundEnabled` (default off).
-4. **Socket path** — Core `PersistencePaths.resolve()` owns `NOCTURNAL_SOCKET`; UI uses `paths.socketURL` only (no env re-parse in AppModel).
-5. **Multi-display** — pill follows mouse-containing screen; no per-display sticky preference yet.
-6. **Question choices** — freeform + choice chips; no multi-select.
-
----
-
-## Peer review
-
-`docs/reviews/ui-on-core.md` — core API fitness for UI integration.
-
----
-
-## Suggested next (QA / polish)
-
-1. VoiceOver pass on menu bar window + overlay expand.
-2. Simulate approval envelope → Approve writes `responses/` and clears badge.
-3. Toggle Reduce Motion in System Settings and confirm pill expand is instant.
-4. Optional: hide Dock window when packaged as agent-only companion.
+4. **Multi-display** — pill follows mouse-containing screen; no per-display sticky preference yet.
+5. **Overlay geometry unit tests** live in Core as layout contracts (AppKit shadow shape is not unit-testable under CLT).

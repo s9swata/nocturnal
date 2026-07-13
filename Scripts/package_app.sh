@@ -38,13 +38,54 @@ mkdir -p \
   "$APP/Contents/MacOS" \
   "$APP/Contents/Resources/Helpers" \
   "$APP/Contents/Resources/Fixtures" \
+  "$APP/Contents/Resources/Brand" \
   "$APP/Contents/Frameworks"
 
-# Convert Icon.icon to Icon.icns if present (requires iconutil).
-ICON_SOURCE="$ROOT/Icon.icon"
-ICON_TARGET="$ROOT/Icon.icns"
-if [[ -f "$ICON_SOURCE" ]]; then
-  iconutil --convert icns --output "$ICON_TARGET" "$ICON_SOURCE" || true
+# ---------------------------------------------------------------------------
+# App icon: generate Icon.icns from full-bleed brand PNG source.
+# ---------------------------------------------------------------------------
+ICON_PNG_CANDIDATES=(
+  "$ROOT/Assets/Brand/nocturnal-app-icon.png"
+  "$ROOT/Sources/Nocturnal/Resources/Brand/nocturnal-app-icon.png"
+)
+ICON_PNG=""
+for candidate in "${ICON_PNG_CANDIDATES[@]}"; do
+  if [[ -f "$candidate" ]]; then
+    ICON_PNG="$candidate"
+    break
+  fi
+done
+
+ICON_TARGET="$ROOT/build/Icon.icns"
+ICONSET_DIR="$ROOT/build/Nocturnal.iconset"
+if [[ -n "$ICON_PNG" ]] && command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
+  rm -rf "$ICONSET_DIR"
+  mkdir -p "$ICONSET_DIR"
+  # Standard macOS iconset sizes (1x + 2x).
+  declare -a ICON_SIZES=(16 32 128 256 512)
+  for size in "${ICON_SIZES[@]}"; do
+    sips -z "$size" "$size" "$ICON_PNG" --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null
+    double=$((size * 2))
+    sips -z "$double" "$double" "$ICON_PNG" --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" >/dev/null
+  done
+  # 32x32@1x is also icon_32x32.png; 16@2x is icon_16x16@2x already covered.
+  # iconutil also expects icon_32x32.png (32) and icon_32x32@2x (64) — done above.
+  iconutil --convert icns --output "$ICON_TARGET" "$ICONSET_DIR"
+  echo "Generated $ICON_TARGET from $ICON_PNG"
+elif [[ -f "$ROOT/Icon.icns" ]]; then
+  cp "$ROOT/Icon.icns" "$ICON_TARGET"
+  echo "Using existing Icon.icns"
+else
+  echo "WARNING: No app icon source found; CFBundleIconFile may be missing." >&2
+  ICON_TARGET=""
+fi
+
+# Also keep legacy Icon.icon → icns path if present and we have no PNG.
+if [[ -z "${ICON_TARGET}" || ! -f "${ICON_TARGET}" ]]; then
+  if [[ -f "$ROOT/Icon.icon" ]]; then
+    iconutil --convert icns --output "$ROOT/build/Icon.icns" "$ROOT/Icon.icon" || true
+    ICON_TARGET="$ROOT/build/Icon.icns"
+  fi
 fi
 
 LSUI_VALUE="false"
@@ -142,13 +183,58 @@ install_binary "nocturnal-setup" \
 install_binary "nocturnal-setup" "$APP/Contents/MacOS/nocturnal-setup"
 install_binary "nocturnal-hook-forwarder" "$APP/Contents/MacOS/nocturnal-hook-forwarder"
 
-# Bundle app resources (if any).
+# Bundle app resources (if any). Skip Brand here — copied explicitly below so
+# working files (e.g. chroma intermediates) never ship.
 APP_RESOURCES_DIR="$ROOT/Sources/$APP_NAME/Resources"
 if [[ -d "$APP_RESOURCES_DIR" ]]; then
-  cp -R "$APP_RESOURCES_DIR/." "$APP/Contents/Resources/" 2>/dev/null || true
+  # Copy everything except Brand/ (handled by production allow-list).
+  shopt -s nullglob dotglob
+  for entry in "$APP_RESOURCES_DIR"/*; do
+    base=$(basename "$entry")
+    if [[ "$base" == "Brand" ]]; then
+      continue
+    fi
+    if [[ -d "$entry" ]]; then
+      mkdir -p "$APP/Contents/Resources/$base"
+      cp -R "$entry/." "$APP/Contents/Resources/$base/"
+    else
+      cp "$entry" "$APP/Contents/Resources/"
+    fi
+  done
+  shopt -u nullglob dotglob
 fi
 
-# Ship simulation fixtures with the app for demo mode offline use.
+# Brand assets — production allow-list only (never recursive Assets/Brand).
+# Runtime source of truth: Sources/Nocturnal/Resources/Brand.
+BRAND_DEST="$APP/Contents/Resources/Brand"
+mkdir -p "$BRAND_DEST"
+# Clear any prior contents so only the two production files remain.
+rm -rf "${BRAND_DEST:?}/"*
+BRAND_PRODUCTION_PNGS=(nocturnal-app-icon.png nocturnal-owl-mark.png)
+for name in "${BRAND_PRODUCTION_PNGS[@]}"; do
+  if [[ -f "$ROOT/Sources/Nocturnal/Resources/Brand/$name" ]]; then
+    cp "$ROOT/Sources/Nocturnal/Resources/Brand/$name" "$BRAND_DEST/$name"
+  elif [[ -f "$ROOT/Assets/Brand/$name" ]]; then
+    cp "$ROOT/Assets/Brand/$name" "$BRAND_DEST/$name"
+  else
+    echo "ERROR: missing production brand asset: $name" >&2
+    exit 1
+  fi
+done
+BRAND_COUNT=$(find "$BRAND_DEST" -type f | wc -l | tr -d ' ')
+if [[ "$BRAND_COUNT" -ne 2 ]]; then
+  echo "ERROR: Resources/Brand must contain exactly 2 production PNGs, found ${BRAND_COUNT}:" >&2
+  ls -la "$BRAND_DEST" >&2
+  exit 1
+fi
+for name in "${BRAND_PRODUCTION_PNGS[@]}"; do
+  if [[ ! -f "$BRAND_DEST/$name" ]]; then
+    echo "ERROR: Brand missing required file: $name" >&2
+    exit 1
+  fi
+done
+
+# Ship Codex/Claude simulation fixtures.
 if [[ -d "$ROOT/Fixtures" ]]; then
   cp -R "$ROOT/Fixtures/." "$APP/Contents/Resources/Fixtures/"
 fi
@@ -175,7 +261,7 @@ for dir in "${FRAMEWORK_DIRS[@]}"; do
   fi
 done
 
-if [[ -f "$ICON_TARGET" ]]; then
+if [[ -n "${ICON_TARGET}" && -f "$ICON_TARGET" ]]; then
   cp "$ICON_TARGET" "$APP/Contents/Resources/Icon.icns"
 fi
 
@@ -232,5 +318,10 @@ codesign "${CODESIGN_ARGS[@]}" \
 
 echo "Created $APP"
 echo "Helpers: $APP/Contents/Resources/Helpers/"
+echo "Icon: $APP/Contents/Resources/Icon.icns"
+echo "Brand: $APP/Contents/Resources/Brand/"
 ls -la "$APP/Contents/MacOS"
 ls -la "$APP/Contents/Resources/Helpers"
+ls -la "$APP/Contents/Resources/Brand" 2>/dev/null || true
+ls -la "$APP/Contents/Resources/Icon.icns" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$APP/Contents/Info.plist" 2>/dev/null || true
