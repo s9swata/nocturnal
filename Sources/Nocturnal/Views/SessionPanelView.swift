@@ -131,23 +131,37 @@ struct SessionPanelView: View {
     }
 }
 
-// MARK: - Quiet-only (all recovered stubs hidden)
+// MARK: - Quiet-only (idle / recovery stubs hidden)
 
 struct QuietSessionsHiddenView: View {
     @Bindable var model: AppModel
     var style: SessionPanelStyle
+
+    private var hiddenCount: Int {
+        max(model.quietSessionCount, model.recoveryStubCount)
+    }
+
+    private var hiddenLabel: String {
+        if model.recoveryStubCount > 0, model.quietSessionCount == model.recoveryStubCount {
+            return "\(model.recoveryStubCount) recovered from disk"
+        }
+        if model.quietSessionCount > 0 {
+            return "\(model.quietSessionCount) quiet sessions"
+        }
+        return "Quiet sessions"
+    }
 
     var body: some View {
         VStack(spacing: 12) {
             Text("No live sessions")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(NocturnalPalette.fgPrimary)
-            Text("\(model.recoveryStubCount) recovered from disk are hidden so the list stays useful.")
+            Text("\(hiddenLabel) are hidden so the list stays useful.")
                 .font(.caption)
                 .foregroundStyle(NocturnalPalette.fgSecondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: style == .menuBar ? 260 : 320)
-            Button("Show recovered sessions") {
+            Button("Show quiet sessions") {
                 model.showQuietSessions = true
             }
             .buttonStyle(.bordered)
@@ -156,7 +170,7 @@ struct QuietSessionsHiddenView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(NocturnalLayout.contentPadding)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("No live sessions. \(model.recoveryStubCount) recovered hidden.")
+        .accessibilityLabel("No live sessions. \(hiddenCount) quiet hidden.")
     }
 }
 

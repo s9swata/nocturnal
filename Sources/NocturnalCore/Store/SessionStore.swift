@@ -254,9 +254,23 @@ public actor SessionStore {
                 session.source = .opencode
             }
         }
+        // Offline recovery is metadata-only for sessions that already have live
+        // activity / attention — never demote a live OpenCode approval or running
+        // session because a disk timestamp is newer than the last socket event.
+        let isReconcileOnly = envelope.eventType == "session.reconciled"
+        let protectLiveFromReconcile = isReconcileOnly && isExisting && (
+            session.state.needsAttention
+                || session.state == .running
+                || session.pendingApproval != nil
+                || session.pendingQuestion != nil
+                || session.currentActivity?.isActive == true
+                || !session.isRecoveryStub
+        )
+
         if let summary = decoded.summaryHint, allowLifecycleMutation || !isTerminal {
             // Allow summary refresh on non-lifecycle stale events only when not terminal revival.
-            if allowLifecycleMutation || !isStaleEvent {
+            // Never overwrite a live session's summary with recovery copy.
+            if !protectLiveFromReconcile, allowLifecycleMutation || !isStaleEvent {
                 session.summary = summary
             }
         }
@@ -280,7 +294,7 @@ public actor SessionStore {
             session.transcriptPath = path
         }
 
-        if allowLifecycleMutation {
+        if allowLifecycleMutation, !protectLiveFromReconcile {
             if let state = decoded.state {
                 session.state = state
             }
@@ -377,19 +391,37 @@ public actor SessionStore {
                 }
             }
             session.pendingApproval = nil
-            session.state = .running
             session.summary = decision.approved ? "Approved" : "Denied"
             session.updatedAt = decision.decidedAt
             SessionActivityPolicy.endCurrent(on: &session, at: decision.decidedAt)
-            SessionActivityPolicy.setCurrent(
-                SessionActivity(
-                    kind: .turn,
-                    label: decision.approved ? "Approved" : "Denied",
-                    eventType: "local.approval",
-                    startedAt: decision.decidedAt
-                ),
-                on: &session
-            )
+            if decision.approved {
+                // Allow continues work — active turn until next lifecycle event.
+                session.state = .running
+                SessionActivityPolicy.setCurrent(
+                    SessionActivity(
+                        kind: .turn,
+                        label: "Approved",
+                        eventType: "local.approval",
+                        startedAt: decision.decidedAt
+                    ),
+                    on: &session
+                )
+            } else {
+                // Deny finishes the blocked command — do not leave a permanent
+                // active turn (stale-session repair skips live turns).
+                session.state = .idle
+                SessionActivityPolicy.setCurrent(
+                    SessionActivity(
+                        kind: .session,
+                        label: "Denied",
+                        eventType: "local.approval",
+                        startedAt: decision.decidedAt,
+                        endedAt: decision.decidedAt
+                    ),
+                    on: &session
+                )
+                SessionActivityPolicy.endCurrent(on: &session, at: decision.decidedAt)
+            }
             await upsert(session, persist: true, promoteToFront: true)
             return session
         case .question(let answer):

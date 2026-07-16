@@ -23,11 +23,14 @@ Agent integration is **capability-based** — see `docs/AGENT_INTEGRATION.md` fo
 | **NocturnalCoreTests** | Tests | Swift Testing coverage for core contracts |
 
 ```
-Codex/Claude native hooks ─► nocturnal-hook-forwarder ─► Unix socket (NDJSON)
+Codex / Claude hooks  ─► nocturnal-hook-forwarder ─► Unix socket (NDJSON)
+OpenCode JS plugin    ─► (direct connect)         ─► Unix socket (NDJSON)
+Cursor / Grok hooks   ─► nocturnal-hook-forwarder ─► Unix socket (NDJSON)
                                               │
                                               ▼
                                          EventSocketServer
                                               │
+                    (PermissionRequest: wait UI → allow/deny stdout)
                                               ▼
                                          SessionStore (actor)
                                               │
@@ -36,7 +39,11 @@ Codex/Claude native hooks ─► nocturnal-hook-forwarder ─► Unix socket (ND
                          Persistence     AppModel (@MainActor)  Response files
                          (JSON)          SwiftUI / Overlay
 
-Codex local sessions/session_meta ── bounded read-only catch-up ──► SessionStore
+Offline recovery (bounded, fail-open; never overrides live attention):
+  Codex  ~/.codex/sessions/**/rollout-*.jsonl  (session_meta header)
+  OpenCode SQLite/JSON under data root
+  Grok   ~/.grok/active_sessions.json + sessions/**/summary.json
+                                              ──► SessionStore
 ```
 
 ## Concurrency boundaries

@@ -98,6 +98,67 @@ struct GrokBridgeTests {
             EventEnvelope(source: .grokBuild, eventType: "stop", sessionId: "sid-1")
         )
         #expect(stop.state == .idle)
+
+        let stopFailure = decoder.decode(
+            EventEnvelope(source: .grokBuild, eventType: "stop_failure", sessionId: "sid-1")
+        )
+        #expect(stopFailure.state == .failed)
+    }
+
+    @Test func doctorRejectsInvalidGrokJSON() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-grok-badjson")
+        defer { cleanup() }
+        let installer = HookInstaller(
+            configRoot: temp,
+            forwarderBinaryPath: URL(fileURLWithPath: "\(temp.path)/bin/nocturnal-hook-forwarder"),
+            socketPath: URL(fileURLWithPath: "\(temp.path)/ipc.sock"),
+            backupsDirectory: temp.appendingPathComponent("backups", isDirectory: true)
+        )
+        let native = installer.nativeConfigURL(for: .grok)
+        try FileManager.default.createDirectory(
+            at: native.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let broken = """
+        { "SessionStart": "nocturnal-hook-forwarder --wrap-source grok-build \(temp.path)/ipc.sock",
+        """
+        try broken.write(to: native, atomically: true, encoding: .utf8)
+        let doctor = installer.doctor(product: .grok)
+        #expect(doctor.succeeded == false)
+        #expect(doctor.message.lowercased().contains("invalid"))
+    }
+
+    @Test func grokHomeOverrideUsedWhenNotUnderConfigRoot() {
+        let custom = URL(fileURLWithPath: "/tmp/custom-grok-home", isDirectory: true)
+        let installer = HookInstaller(
+            configRoot: URL(fileURLWithPath: "/tmp/home", isDirectory: true),
+            grokHome: custom,
+            forwarderBinaryPath: URL(fileURLWithPath: "/tmp/bin/nocturnal-hook-forwarder"),
+            socketPath: URL(fileURLWithPath: "/tmp/ipc.sock"),
+            backupsDirectory: URL(fileURLWithPath: "/tmp/backups", isDirectory: true)
+        )
+        #expect(installer.grokHomeDirectory() == custom)
+        #expect(installer.nativeConfigURL(for: .grok).path.hasPrefix(custom.path))
+    }
+
+    @Test func scannerRejectsOversizedActiveSessionsFile() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-grok-big")
+        defer { cleanup() }
+        let grokHome = temp.appendingPathComponent(".grok", isDirectory: true)
+        try FileManager.default.createDirectory(at: grokHome, withIntermediateDirectories: true)
+        let huge = String(repeating: "x", count: 600_000)
+        try huge.write(
+            to: grokHome.appendingPathComponent("active_sessions.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let scanner = GrokSessionScanner(
+            grokHome: grokHome,
+            maxSessions: 20,
+            maxActiveSessionsBytes: 512 * 1024
+        )
+        let snaps = try scanner.scan()
+        #expect(snaps.isEmpty)
     }
 
     @Test func compositeRoutesGrokSource() {

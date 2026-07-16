@@ -77,9 +77,17 @@ public struct OpenCodePermissionClient: Sendable {
     ) -> URL? {
         var root = base.absoluteString
         while root.hasSuffix("/") { root.removeLast() }
+        // Opaque IDs may contain `/` — encode as single path segments, not free paths.
         let path =
-            "\(root)/session/\(sessionId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? sessionId)/permissions/\(permissionId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? permissionId)"
+            "\(root)/session/\(encodePathSegment(sessionId))/permissions/\(encodePathSegment(permissionId))"
         return URL(string: path)
+    }
+
+    /// Percent-encode a single path segment (slashes must not create extra segments).
+    public static func encodePathSegment(_ value: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 
     public static func requestBody(response: OpenCodePermissionResponse) -> Data {

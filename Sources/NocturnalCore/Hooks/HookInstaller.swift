@@ -121,6 +121,9 @@ public struct HookInstaller: Sendable {
     public var configRoot: URL
     /// Explicit Codex home (`CODEX_HOME`). Nil means `<configRoot>/.codex`.
     public var codexHome: URL?
+    /// Explicit Grok home (`GROK_HOME`). Nil means `<configRoot>/.grok`.
+    /// Ignored when `NOCTURNAL_CONFIG_ROOT` is set (test isolation).
+    public var grokHome: URL?
     public var forwarderBinaryPath: URL
     public var socketPath: URL
     public var backupsDirectory: URL
@@ -141,6 +144,7 @@ public struct HookInstaller: Sendable {
     public init(
         configRoot: URL,
         codexHome: URL? = nil,
+        grokHome: URL? = nil,
         forwarderBinaryPath: URL,
         socketPath: URL,
         backupsDirectory: URL,
@@ -149,6 +153,7 @@ public struct HookInstaller: Sendable {
     ) {
         self.configRoot = configRoot
         self.codexHome = codexHome
+        self.grokHome = grokHome
         self.forwarderBinaryPath = forwarderBinaryPath
         self.socketPath = socketPath
         self.backupsDirectory = backupsDirectory
@@ -176,18 +181,25 @@ public struct HookInstaller: Sendable {
         // Socket resolution lives in PersistencePaths (NOCTURNAL_SOCKET + default).
         let paths = try PersistencePaths.resolve(fileManager: fileManager, environment: environment)
 
+        // Test redirection always wins; never escape NOCTURNAL_CONFIG_ROOT.
+        let underTestRoot = environment[NocturnalEnvironmentKey.configRoot.rawValue]?.isEmpty == false
+
         let codexHome: URL? = {
-            // Test redirection always wins; never escape NOCTURNAL_CONFIG_ROOT.
-            if environment[NocturnalEnvironmentKey.configRoot.rawValue]?.isEmpty == false {
-                return nil
-            }
+            if underTestRoot { return nil }
             guard let raw = environment["CODEX_HOME"], !raw.isEmpty else { return nil }
+            return URL(fileURLWithPath: raw, isDirectory: true)
+        }()
+
+        let grokHome: URL? = {
+            if underTestRoot { return nil }
+            guard let raw = environment["GROK_HOME"], !raw.isEmpty else { return nil }
             return URL(fileURLWithPath: raw, isDirectory: true)
         }()
 
         return HookInstaller(
             configRoot: home,
             codexHome: codexHome,
+            grokHome: grokHome,
             forwarderBinaryPath: forwarderBinaryPath,
             socketPath: paths.socketURL,
             backupsDirectory: paths.backupsDirectory,
@@ -239,9 +251,10 @@ public struct HookInstaller: Sendable {
         }
     }
 
-    /// Grok Build home: `<configRoot>/.grok` (or `GROK_HOME` when resolving in production).
+    /// Grok Build home: `GROK_HOME` when set in production, else `<configRoot>/.grok`.
     public func grokHomeDirectory() -> URL {
-        configRoot.appendingPathComponent(".grok", isDirectory: true)
+        if let grokHome { return grokHome }
+        return configRoot.appendingPathComponent(".grok", isDirectory: true)
     }
 
     /// Grok auto-loaded hook JSON directory.
@@ -716,7 +729,7 @@ public struct HookInstaller: Sendable {
     private func mergeOpenCodeNative() throws -> MergeOutcome {
         let url = nativeConfigURL(for: .opencode)
         let fm = FileManager.default
-        let body = openCodePluginSource()
+        let body = try openCodePluginSource()
 
         if !dryRun {
             try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -1043,7 +1056,8 @@ public struct HookInstaller: Sendable {
     /// Fail-open JS plugin that maps OpenCode events → EventEnvelope NDJSON on the socket.
     ///
     /// Template: ``OpenCodeBridge.plugin.js`` (v3: ``permission.ask`` + ``serverUrl`` + correct SDK name).
-    public func openCodePluginSource() -> String {
+    /// Throws when the template cannot be loaded — never writes an empty no-op plugin.
+    public func openCodePluginSource() throws -> String {
         let socket = socketPath.path
         let socketJSON: String = {
             if let data = try? JSONSerialization.data(
@@ -1058,33 +1072,31 @@ public struct HookInstaller: Sendable {
             return "\"\(Self.escapeJSONStringContents(socket))\""
         }()
 
-        if let template = Self.loadOpenCodePluginTemplate() {
-            // Template uses SOCKET_PATH = "__NOCTURNAL_SOCKET__" as a quoted placeholder.
-            return template.replacingOccurrences(
-                of: "\"__NOCTURNAL_SOCKET__\"",
-                with: socketJSON
-            )
+        guard let template = Self.loadOpenCodePluginTemplate() else {
+            throw HookInstallerError.missingOpenCodePluginTemplate
         }
-
-        // Emergency stub if template file is missing from the checkout.
-        return """
-        // \(Self.managedMarkerBegin)
-        // \(Self.openCodePluginMarker) v3-fallback — template missing
-        // \(Self.managedMarkerEnd)
-        const SOCKET_PATH = \(socketJSON)
-        export default async () => ({})
-        """
+        // Template uses SOCKET_PATH = "__NOCTURNAL_SOCKET__" as a quoted placeholder.
+        return template.replacingOccurrences(
+            of: "\"__NOCTURNAL_SOCKET__\"",
+            with: socketJSON
+        )
     }
 
-    /// Load OpenCodeBridge.plugin.js from the source tree or bundle.
+    /// Load OpenCodeBridge.plugin.js from the SPM resource bundle, source tree, or app Resources.
     private static func loadOpenCodePluginTemplate() -> String? {
-        let fm = FileManager.default
         var candidates: [URL] = []
+        // Packaged / SPM: Bundle.module ships the template with NocturnalCore.
+        if let bundled = Bundle.module.url(
+            forResource: "OpenCodeBridge.plugin",
+            withExtension: "js"
+        ) {
+            candidates.append(bundled)
+        }
         let thisFile = URL(fileURLWithPath: #filePath)
         candidates.append(
             thisFile.deletingLastPathComponent().appendingPathComponent("OpenCodeBridge.plugin.js")
         )
-        let cwd = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
+        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
         candidates.append(
             cwd.appendingPathComponent("Sources/NocturnalCore/Hooks/OpenCodeBridge.plugin.js")
         )
@@ -1093,7 +1105,8 @@ public struct HookInstaller: Sendable {
         }
         for url in candidates {
             if let text = try? String(contentsOf: url, encoding: .utf8),
-               text.contains("nocturnal-opencode-bridge")
+               text.contains("nocturnal-opencode-bridge"),
+               !text.contains("v3-fallback")
             {
                 return text
             }
@@ -1181,8 +1194,11 @@ public struct HookInstaller: Sendable {
         }
 
         if product == .grok {
-            guard let text = try? String(contentsOf: native, encoding: .utf8) else {
-                return (false, "Grok hooks file unreadable")
+            guard let data = try? Data(contentsOf: native),
+                  (try? JSONSerialization.jsonObject(with: data)) is [String: Any],
+                  let text = String(data: data, encoding: .utf8)
+            else {
+                return (false, "Grok hooks file is invalid JSON")
             }
             let managed = text.contains(Self.managedCommandMarker)
                 && text.contains(Self.grokWrapSourceFlag)
@@ -1205,8 +1221,11 @@ public struct HookInstaller: Sendable {
         }
 
         if product == .cursor {
-            guard let text = try? String(contentsOf: native, encoding: .utf8) else {
-                return (false, "Cursor hooks.json unreadable")
+            guard let data = try? Data(contentsOf: native),
+                  (try? JSONSerialization.jsonObject(with: data)) is [String: Any],
+                  let text = String(data: data, encoding: .utf8)
+            else {
+                return (false, "Cursor hooks.json is invalid JSON")
             }
             let managed = text.contains(Self.managedCommandMarker)
                 && text.contains(Self.cursorWrapSourceFlag)
@@ -1387,11 +1406,14 @@ public struct HookInstaller: Sendable {
 
 public enum HookInstallerError: Error, Sendable, Equatable, LocalizedError {
     case invalidCodexHooks(String)
+    case missingOpenCodePluginTemplate
 
     public var errorDescription: String? {
         switch self {
         case .invalidCodexHooks(let detail):
             return "Cannot safely repair Codex hooks: \(detail)"
+        case .missingOpenCodePluginTemplate:
+            return "OpenCode plugin template missing from NocturnalCore resources (OpenCodeBridge.plugin.js)"
         }
     }
 }

@@ -90,12 +90,24 @@ public struct FailOpenHookForwarder: HookForwarding {
         self.options = options
     }
 
+    /// Legacy send-only path: never blocks on permission UI.
+    ///
+    /// Callers that need agent-facing Allow/Deny stdout must use
+    /// ``forwardWithDecision(line:socketPath:)`` (CLI does).
     public func forward(line: Data, socketPath: URL) -> HookForwardResult {
-        forwardWithDecision(line: line, socketPath: socketPath).forward
+        forwardInternal(line: line, socketPath: socketPath, requestDecision: false).forward
     }
 
     /// Forward one line; for permission events, waits for Nocturnal UI decision.
     public func forwardWithDecision(line: Data, socketPath: URL) -> HookForwardDecisionOutcome {
+        forwardInternal(line: line, socketPath: socketPath, requestDecision: true)
+    }
+
+    private func forwardInternal(
+        line: Data,
+        socketPath: URL,
+        requestDecision: Bool
+    ) -> HookForwardDecisionOutcome {
         let trimmed = line.trimmingCRLFPublic
         guard !trimmed.isEmpty else {
             return HookForwardDecisionOutcome(
@@ -115,11 +127,12 @@ public struct FailOpenHookForwarder: HookForwarding {
             )
         }
 
-        let needsDecision = HookDecisionTranslator.shouldRequestDecision(
-            eventType: envelope.eventType,
-            source: envelope.source,
-            payload: envelope.payload
-        )
+        let needsDecision = requestDecision
+            && HookDecisionTranslator.shouldRequestDecision(
+                eventType: envelope.eventType,
+                source: envelope.source,
+                payload: envelope.payload
+            )
 
         if needsDecision {
             envelope = HookDecisionTranslator.stampForDecision(

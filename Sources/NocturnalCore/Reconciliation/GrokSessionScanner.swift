@@ -73,13 +73,31 @@ public struct GrokSessionSnapshot: Sendable, Equatable {
 /// 1. `active_sessions.json` — currently open sessions (still injected as idle
 ///    recovery stubs; live hooks upgrade them when events arrive)
 /// 2. `sessions/<encoded-cwd>/<session-id>/summary.json` — recent history
+///
+/// All reads are size- and entry-capped so a corrupted or huge local tree
+/// cannot spike memory at launch (mirrors ``CodexTranscriptScanner``).
 public struct GrokSessionScanner: Sendable {
     public var grokHome: URL
     public var maxSessions: Int
+    /// Reject `active_sessions.json` larger than this (bytes).
+    public var maxActiveSessionsBytes: Int
+    /// Reject each `summary.json` larger than this (bytes).
+    public var maxSummaryBytes: Int
+    /// Max directory entries visited while walking `sessions/`.
+    public var maxDirectoryEntries: Int
 
-    public init(grokHome: URL, maxSessions: Int = 80) {
+    public init(
+        grokHome: URL,
+        maxSessions: Int = 80,
+        maxActiveSessionsBytes: Int = 512 * 1024,
+        maxSummaryBytes: Int = 256 * 1024,
+        maxDirectoryEntries: Int = 5_000
+    ) {
         self.grokHome = grokHome
         self.maxSessions = max(0, maxSessions)
+        self.maxActiveSessionsBytes = max(1, maxActiveSessionsBytes)
+        self.maxSummaryBytes = max(1, maxSummaryBytes)
+        self.maxDirectoryEntries = max(1, maxDirectoryEntries)
     }
 
     public static func resolve(
@@ -139,7 +157,7 @@ public struct GrokSessionScanner: Sendable {
     private func scanActiveSessions(fileManager: FileManager) -> [GrokSessionSnapshot] {
         let url = grokHome.appendingPathComponent("active_sessions.json")
         guard fileManager.fileExists(atPath: url.path),
-              let data = try? Data(contentsOf: url),
+              let data = Self.readBoundedFile(url, maxBytes: maxActiveSessionsBytes, fileManager: fileManager),
               let root = try? JSONSerialization.jsonObject(with: data)
         else {
             return []
@@ -187,6 +205,7 @@ public struct GrokSessionScanner: Sendable {
         guard fileManager.fileExists(atPath: sessionsRoot.path) else { return [] }
 
         var candidates: [(url: URL, mtime: Date)] = []
+        var visited = 0
         guard let cwdDirs = try? fileManager.contentsOfDirectory(
             at: sessionsRoot,
             includingPropertiesForKeys: [.isDirectoryKey],
@@ -196,6 +215,8 @@ public struct GrokSessionScanner: Sendable {
         }
 
         for cwdDir in cwdDirs {
+            visited += 1
+            if visited > maxDirectoryEntries { break }
             var isDir: ObjCBool = false
             guard fileManager.fileExists(atPath: cwdDir.path, isDirectory: &isDir), isDir.boolValue
             else { continue }
@@ -207,6 +228,8 @@ public struct GrokSessionScanner: Sendable {
             ) else { continue }
 
             for sessionDir in sessionDirs {
+                visited += 1
+                if visited > maxDirectoryEntries { break }
                 var sessionIsDir: ObjCBool = false
                 guard fileManager.fileExists(atPath: sessionDir.path, isDirectory: &sessionIsDir),
                       sessionIsDir.boolValue
@@ -217,6 +240,7 @@ public struct GrokSessionScanner: Sendable {
                 let mtime = values?.contentModificationDate ?? Date.distantPast
                 candidates.append((summary, mtime))
             }
+            if visited > maxDirectoryEntries { break }
         }
 
         // Newest first; cap before parsing large trees.
@@ -226,15 +250,15 @@ public struct GrokSessionScanner: Sendable {
         var out: [GrokSessionSnapshot] = []
         out.reserveCapacity(limited.count)
         for item in limited {
-            if let snap = parseSummary(url: item.url, mtime: item.mtime) {
+            if let snap = parseSummary(url: item.url, mtime: item.mtime, fileManager: fileManager) {
                 out.append(snap)
             }
         }
         return out
     }
 
-    private func parseSummary(url: URL, mtime: Date) -> GrokSessionSnapshot? {
-        guard let data = try? Data(contentsOf: url),
+    private func parseSummary(url: URL, mtime: Date, fileManager: FileManager) -> GrokSessionSnapshot? {
+        guard let data = Self.readBoundedFile(url, maxBytes: maxSummaryBytes, fileManager: fileManager),
               let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else {
             return nil
@@ -295,5 +319,19 @@ public struct GrokSessionScanner: Sendable {
             return Date(timeIntervalSince1970: d > 1e12 ? d / 1000 : d)
         }
         return nil
+    }
+
+    /// Load a regular file only when its size is within `maxBytes`.
+    private static func readBoundedFile(
+        _ url: URL,
+        maxBytes: Int,
+        fileManager: FileManager
+    ) -> Data? {
+        guard let attrs = try? fileManager.attributesOfItem(atPath: url.path),
+              let sizeNumber = attrs[.size] as? NSNumber
+        else { return nil }
+        let size = sizeNumber.intValue
+        guard size > 0, size <= maxBytes else { return nil }
+        return try? Data(contentsOf: url)
     }
 }

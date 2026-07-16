@@ -106,17 +106,33 @@ public struct SessionStats: Codable, Sendable, Hashable, Equatable {
     }
 
     /// `↑ 12.0k / 3.1k` style when either token field is known.
+    /// Only renders directions that were actually reported (no synthetic zeros).
     public var tokensMetaLine: String? {
-        guard tokensIn != nil || tokensOut != nil else { return nil }
-        let up = Self.compactCount(tokensIn ?? 0)
-        let down = Self.compactCount(tokensOut ?? 0)
-        return "↑ \(up) / \(down)"
+        switch (tokensIn, tokensOut) {
+        case let (i?, o?):
+            return "↑ \(Self.compactCount(i)) / \(Self.compactCount(o))"
+        case let (i?, nil):
+            return "↑ \(Self.compactCount(i))"
+        case let (nil, o?):
+            return "↓ \(Self.compactCount(o))"
+        case (nil, nil):
+            return nil
+        }
     }
 
     /// `+12 -3` when either diff field is known.
+    /// Only renders sides that were actually reported (no synthetic zeros).
     public var diffMetaLine: String? {
-        guard diffAdded != nil || diffRemoved != nil else { return nil }
-        return "+\(diffAdded ?? 0) −\(diffRemoved ?? 0)"
+        switch (diffAdded, diffRemoved) {
+        case let (a?, r?):
+            return "+\(a) −\(r)"
+        case let (a?, nil):
+            return "+\(a)"
+        case let (nil, r?):
+            return "−\(r)"
+        case (nil, nil):
+            return nil
+        }
     }
 
     private static func compactCount(_ n: Int) -> String {
@@ -229,10 +245,15 @@ public struct Session: Identifiable, Codable, Sendable, Hashable {
     }
 
     /// Recovery stub from local transcript metadata — not a live agent session.
+    ///
+    /// Depends on the **latest** event type (and only falls back to recovery
+    /// summary when no live event has arrived yet). Tool/turn events clear the
+    /// stub label even if a recovery summary string remains on the session.
     public var isRecoveryStub: Bool {
-        if lastEventType == "session.reconciled" { return true }
-        if summary.localizedCaseInsensitiveContains("Recovered from local") { return true }
-        return false
+        if let last = lastEventType, !last.isEmpty {
+            return last == "session.reconciled"
+        }
+        return summary.localizedCaseInsensitiveContains("Recovered from local")
     }
 
     /// Quiet: idle/terminal with nothing actionable.

@@ -22,9 +22,10 @@ let package = Package(
         .target(
             name: "NocturnalCore",
             path: "Sources/NocturnalCore",
-            exclude: [
-                // Loaded at install time via #filePath, not compiled into the module.
-                "Hooks/OpenCodeBridge.plugin.js",
+            // Bundle the OpenCode plugin template so packaged nocturnal-setup
+            // never falls back to an empty stub when #filePath is unavailable.
+            resources: [
+                .copy("Hooks/OpenCodeBridge.plugin.js"),
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),

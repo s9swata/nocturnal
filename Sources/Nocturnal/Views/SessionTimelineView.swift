@@ -6,6 +6,8 @@ struct SessionTimelineView: View {
     let session: Session
     /// Tighter chrome when nested under a row.
     var compact: Bool = false
+    /// Combined app + system reduce-motion preference from the parent row/model.
+    var prefersReducedMotion: Bool = false
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
 
     private var items: [SessionActivity] {
@@ -106,7 +108,7 @@ struct SessionTimelineView: View {
                                 ? NocturnalPalette.accentSuccess
                                 : NocturnalPalette.fgSecondary,
                             size: 11,
-                            animate: !systemReduceMotion && activity.isActive,
+                            animate: !prefersReducedMotion && !systemReduceMotion && activity.isActive,
                             mode: activity.isActive ? .running : .idle
                         )
 

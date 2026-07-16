@@ -126,10 +126,11 @@ public struct CodexTranscriptScanner: Sendable {
             candidates.append((url, values.contentModificationDate ?? .distantPast))
         }
 
-        return try candidates
+        // Fail-open per candidate: one bad rollout must not abort the whole scan.
+        return candidates
             .sorted { $0.modified > $1.modified }
             .prefix(maxFiles)
-            .compactMap { try snapshot(at: $0.url) }
+            .compactMap { try? snapshot(at: $0.url) }
     }
 
     private func snapshot(at url: URL) throws -> CodexTranscriptSnapshot? {

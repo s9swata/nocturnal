@@ -146,7 +146,9 @@ public enum SessionPrimarySelection: Sendable {
     ) -> Bool {
         guard let at = lastMeaningfulActivityAt(session) else { return false }
         if session.state.needsAttention { return true }
-        if session.state == .running { return true }
+        // Active tools/turns/approvals/questions stay fresh regardless of age.
+        // Bare `.running` does **not** bypass the age check — otherwise a
+        // zombie OpenCode session with hour-old tools owns tier 4 forever.
         if let activity = session.currentActivity, activity.isActive {
             switch activity.kind {
             case .tool, .turn, .approval, .question:

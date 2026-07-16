@@ -98,7 +98,10 @@ public enum ToolPayloadExtraction: Sendable {
         if detail == nil {
             if let command { detail = command }
             else if let path { detail = path }
-            else if case .string(let s)? = payload["tool_input"] {
+            else if case .string(let s)? = payload["tool_input"]
+                ?? payload["toolInput"]
+                ?? payload["input"]
+            {
                 detail = s
             } else if let toolInput {
                 // Compact object for display when no clear command/path.
@@ -204,8 +207,14 @@ public enum ToolPayloadExtraction: Sendable {
     private static func intValue(_ payload: [String: JSONValue], _ keys: String...) -> Int? {
         for key in keys {
             if let n = payload[key]?.exactIntValue { return n }
-            if let d = payload[key]?.numberValue, d >= 0, d == d.rounded() {
-                return Int(d)
+            // Failable conversion only — `Int(Double)` traps outside Int range.
+            if let d = payload[key]?.numberValue,
+               d.isFinite,
+               d >= 0,
+               d == d.rounded(),
+               let n = Int(exactly: d)
+            {
+                return n
             }
             if let s = payload[key]?.stringValue, let n = Int(s) { return n }
         }

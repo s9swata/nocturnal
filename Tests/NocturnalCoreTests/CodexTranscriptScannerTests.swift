@@ -29,15 +29,14 @@ struct CodexTranscriptScannerTests {
         #expect(envelope.source == .codex)
     }
 
-    @Test func skipsSymlinksAndHeadersBeyondBound() throws {
+    @Test func skipsHeadersBeyondBound() throws {
         let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-codex-scan-bound")
         defer { cleanup() }
         let sessions = temp.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         let oversized = sessions.appendingPathComponent("rollout-large.jsonl")
+        // First line longer than maxHeaderBytes → no newline in the bound → skip.
         try (String(repeating: " ", count: 128) + "\n").write(to: oversized, atomically: true, encoding: .utf8)
-        let link = sessions.appendingPathComponent("rollout-link.jsonl")
-        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: oversized)
 
         let scanner = CodexTranscriptScanner(
             sessionsRoot: sessions,
@@ -45,5 +44,44 @@ struct CodexTranscriptScannerTests {
             maxHeaderBytes: 64
         )
         #expect(try scanner.scan().isEmpty)
+    }
+
+    @Test func skipsSymlinksEvenWhenTargetIsValid() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-codex-scan-symlink")
+        defer { cleanup() }
+        let sessions = temp.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let real = sessions.appendingPathComponent("rollout-real.jsonl")
+        let first = #"{"timestamp":"2026-07-13T10:00:00Z","type":"session_meta","payload":{"id":"session-symlink","cwd":"/tmp"}}"#
+        try (first + "\n").write(to: real, atomically: true, encoding: .utf8)
+        let link = sessions.appendingPathComponent("rollout-link.jsonl")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+
+        let scanner = CodexTranscriptScanner(
+            sessionsRoot: sessions,
+            maxFiles: 10,
+            maxHeaderBytes: 64 * 1024
+        )
+        let snaps = try scanner.scan()
+        // Real file only — symlink must not double-count or be followed as a candidate.
+        #expect(snaps.count == 1)
+        #expect(snaps.first?.sessionId == "session-symlink")
+    }
+
+    @Test func skipsMalformedCandidateWithoutAbortingScan() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-codex-scan-malformed")
+        defer { cleanup() }
+        let sessions = temp.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let bad = sessions.appendingPathComponent("rollout-bad.jsonl")
+        try "not-json\n".write(to: bad, atomically: true, encoding: .utf8)
+        let good = sessions.appendingPathComponent("rollout-good.jsonl")
+        let first = #"{"timestamp":"2026-07-13T10:00:00Z","type":"session_meta","payload":{"id":"session-good","cwd":"/tmp"}}"#
+        try (first + "\n").write(to: good, atomically: true, encoding: .utf8)
+
+        let scanner = CodexTranscriptScanner(sessionsRoot: sessions, maxFiles: 10)
+        let snaps = try scanner.scan()
+        #expect(snaps.count == 1)
+        #expect(snaps.first?.sessionId == "session-good")
     }
 }

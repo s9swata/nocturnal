@@ -6,17 +6,17 @@ import Foundation
 /// Deny/Allow chips require ``permissions`` plus a non-``.none`` decision transport.
 public struct AgentCapabilities: Sendable, Equatable, Hashable, Codable {
     /// Session / tool / turn events can drive the island live strip.
-    public var liveActivity: Bool
+    public let liveActivity: Bool
     /// External Allow/Deny is possible (hook decision, HTTP, etc.).
-    public var permissions: Bool
+    public let permissions: Bool
     /// Agent can surface freeform / choice questions to Nocturnal.
-    public var questions: Bool
+    public let questions: Bool
     /// Local disk/db scan can recover idle session stubs on launch.
-    public var recoveryScan: Bool
+    public let recoveryScan: Bool
     /// Jump-back hints (cwd, deep link, terminal) are meaningful.
-    public var jumpBack: Bool
+    public let jumpBack: Bool
     /// `nocturnal-setup` can install product-native hooks/plugins.
-    public var installableHooks: Bool
+    public let installableHooks: Bool
 
     public init(
         liveActivity: Bool = false,

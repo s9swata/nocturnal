@@ -139,20 +139,7 @@ public var stats: SessionStats
 
 ### 3.2 `ApprovalDecision` extension — `ApprovalAndQuestion.swift`
 
-Already has `note: String?`. Add:
-
-```swift
-public var scope: ApprovalScope?   // optional for Codable back-compat
-```
-
-```swift
-public enum ApprovalScope: String, Codable, Sendable, Hashable {
-    case once           // default when nil
-    case sessionTool    // "always allow this tool for this session" (Nocturnal-local sticky)
-}
-```
-
-Keep wire shape additive; missing scope decodes as `once`.
+**Shipped.** `ApprovalScope` (`.once` / `.sessionTool`) and `ApprovalDecision.scope` already exist with additive Codable (missing scope → once). No further model work required for P0 sticky allow.
 
 ### 3.3 Session sticky always-allow (local)
 

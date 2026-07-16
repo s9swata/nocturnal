@@ -195,9 +195,11 @@ struct ResponseRoutingTests {
         try await transport.submit(.approval(decision))
         let updated = await store.applyLocalResponse(.approval(decision))
 
-        #expect(updated?.state == .running)
+        // Deny finishes the blocked command — must not stay permanently Running.
+        #expect(updated?.state == .idle)
         #expect(updated?.pendingApproval == nil)
         #expect(updated?.summary == "Denied")
+        #expect(updated?.currentActivity?.isActive != true)
         #expect(try transport.load(requestId: "e2e-req") != nil)
     }
 

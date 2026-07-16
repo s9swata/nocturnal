@@ -159,6 +159,29 @@ struct SessionActivityTests {
         #expect(clipped.detail?.hasSuffix("…") == true)
     }
 
+    @Test func truncateHonorsSmallLimitsWithoutOverrun() {
+        let line = HumanizedActivityLine(verb: "Running", detail: "swift test --filter All")
+        let tight = line.truncated(limit: 8)
+        #expect(tight.fullLine.count <= 8)
+        let tiny = line.truncated(limit: 3)
+        #expect(tiny.fullLine.count <= 3)
+    }
+
+    @Test func questionDetailKeepsSlashText() {
+        let now = Date()
+        let activity = SessionActivity(
+            kind: .question,
+            label: "Question",
+            detail: "Should we use https://example.com/api?",
+            eventType: "question.asked",
+            startedAt: now
+        )
+        let line = activity.humanizedLine
+        #expect(line.verb == "Question")
+        #expect(line.detail?.contains("https://") == true || line.detail?.contains("example") == true)
+        #expect(line.detail != "api?")
+    }
+
     @Test func approvalBecomesCurrentActivity() async {
         let store = SessionStore()
         let session = await store.apply(EventEnvelope(
@@ -177,6 +200,17 @@ struct SessionActivityTests {
         // Humanized shell titles use "ran <command>" when command/detail is present.
         let live = session.liveStatusLine.lowercased()
         #expect(live.contains("shell") || live.contains("ran") || live.contains("rm"))
+    }
+
+    @Test func sessionStartIsSessionKindNotTurn() async {
+        let store = SessionStore()
+        let started = await store.apply(EventEnvelope(
+            source: .codex,
+            eventType: "session.started",
+            sessionId: "act-session-start"
+        ))
+        #expect(started.currentActivity?.kind == .session)
+        #expect(started.currentActivity?.label == "Session")
     }
 
     @Test func turnLifecycleMapsThinkingThenClears() async {

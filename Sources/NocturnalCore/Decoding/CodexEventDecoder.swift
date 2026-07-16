@@ -126,12 +126,16 @@ public struct CodexEventDecoder: EventDecoding, Sendable {
         case "session.cancelled":
             result.state = .cancelled
         case "tool.approval_required", "PermissionRequest":
+            // Same correlation priority as ``HookDecisionTranslator/decisionRequestId(for:)``
+            // so UI Approve/Deny unblocks the waiting forwarder when both `id` and
+            // `tool_use_id` are present.
             let requestId = EventDecodeHelpers.string(
                 payload,
+                "tool_use_id",
+                "toolUseId",
                 "request_id",
-                "id",
                 "approval_id",
-                "tool_use_id"
+                "id"
             )
                 ?? envelope.id.uuidString
             let tool = EventDecodeHelpers.string(payload, "tool", "tool_name", "name") ?? "tool"

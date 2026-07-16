@@ -60,7 +60,13 @@ public struct SessionDetailSnapshot: Codable, Sendable, Hashable, Equatable {
         {
             return lastUserSnippet
         }
-        if let tool = recentToolRows.first?.displayLine, !Session.isNoiseStatusText(tool) {
+        // Prefer the first displayable tool row (skip noise / system dumps).
+        if let tool = recentToolRows.first(where: { row in
+            let line = row.displayLine
+            return !line.isEmpty
+                && !Session.isNoiseStatusText(line)
+                && !Session.isSystemDumpText(line)
+        })?.displayLine {
             return tool
         }
         return nil

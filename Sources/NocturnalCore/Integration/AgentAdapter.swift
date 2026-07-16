@@ -41,15 +41,11 @@ public struct OpenCodeAgentAdapter: HookInstallingAdapter, HTTPPermissionAdapter
     public var hookProduct: HookProduct? { .opencode }
 
     public func shouldDeliverHTTPPermission(for request: ApprovalRequest) -> Bool {
+        // Only OpenCode markers / session IDs — never generic correlation alone
+        // (Codex/Claude approvals also have request ids + session ids).
         if request.raw["source"]?.stringValue == "opencode" { return true }
         if request.raw["opencode"]?.boolValue == true { return true }
-        if request.raw["permission"] != nil,
-           OpenCodeSessionIdentity.isOpenCodeSessionId(request.sessionId.rawValue)
-        {
-            return true
-        }
         return OpenCodeSessionIdentity.isOpenCodeSessionId(request.sessionId.rawValue)
-            || OpenCodePermissionClient.correlation(from: request) != nil
     }
 }
 
@@ -100,7 +96,9 @@ public enum AgentAdapterCatalog: Sendable {
     }
 
     public static func adapter(parsing raw: String) -> any AgentAdapter {
-        adapter(for: AgentSource(parsing: raw))
+        // Registry preserves custom bridge labels / capabilities; AgentSource alone
+        // collapses unknown labels to `.unknown`.
+        adapter(for: AgentRegistry.profile(parsing: raw))
     }
 
     public static func adapter(for profile: AgentProfile) -> any AgentAdapter {

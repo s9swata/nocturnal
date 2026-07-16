@@ -79,10 +79,31 @@ struct AgentIntegrationTests {
         #expect(adapter.shouldDeliverHTTPPermission(for: request))
     }
 
+    @Test func openCodeHTTPAdapterRejectsCodexCorrelationOnly() {
+        let adapter = OpenCodeAgentAdapter()
+        let request = ApprovalRequest(
+            id: "apr-codex-1",
+            sessionId: SessionID("thread_codex_abc"),
+            toolName: "shell",
+            summary: "rm",
+            detail: "rm -rf /tmp/x",
+            raw: ["source": .string("codex")]
+        )
+        #expect(adapter.shouldDeliverHTTPPermission(for: request) == false)
+    }
+
+    @Test func adapterParsingPreservesCustomBridgeProfile() {
+        let adapter = AgentAdapterCatalog.adapter(parsing: "my-custom-agent")
+        #expect(adapter.profile.id == "my-custom-agent")
+        #expect(adapter.profile.capabilities.liveActivity)
+        #expect(adapter.profile.capabilities.permissions == false)
+    }
+
     @Test func canonicalNormalizeMapsNativeNames() {
         #expect(CanonicalAgentEvent.normalize("PermissionRequest") == "permission.asked")
         #expect(CanonicalAgentEvent.normalize("PreToolUse") == "tool.started")
         #expect(CanonicalAgentEvent.normalize("agent.turn.started") == "turn.started")
+        #expect(CanonicalAgentEvent.normalize("SessionEnd") == "session.completed")
         #expect(CanonicalAgentEvent.normalize("custom.event") == "custom.event")
     }
 

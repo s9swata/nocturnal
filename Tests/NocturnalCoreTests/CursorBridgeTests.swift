@@ -102,6 +102,74 @@ struct CursorBridgeTests {
         #expect(tool.inferredSource == .cursor)
     }
 
+    @Test func decoderMapsTabAndWorkspaceHooks() {
+        let decoder = CursorEventDecoder()
+        let tabRead = decoder.decode(
+            EventEnvelope(
+                source: .cursor,
+                eventType: "beforeTabFileRead",
+                sessionId: "conv-tab",
+                payload: [
+                    "file_path": .string("/tmp/proj/App.swift"),
+                ]
+            )
+        )
+        #expect(!tabRead.isUnknown)
+        #expect(tabRead.state == .running)
+        #expect(tabRead.summaryHint?.lowercased().contains("read") == true
+            || tabRead.titleHint?.lowercased().contains("read") == true)
+
+        let tabEdit = decoder.decode(
+            EventEnvelope(
+                source: .cursor,
+                eventType: "afterTabFileEdit",
+                sessionId: "conv-tab",
+                payload: [
+                    "file_path": .string("/tmp/proj/App.swift"),
+                ]
+            )
+        )
+        #expect(!tabEdit.isUnknown)
+        #expect(tabEdit.state == .running)
+
+        let workspace = decoder.decode(
+            EventEnvelope(
+                source: .cursor,
+                eventType: "workspaceOpen",
+                sessionId: "conv-ws",
+                payload: [
+                    "workspace_roots": .array([.string("/tmp/ws")]),
+                ]
+            )
+        )
+        #expect(!workspace.isUnknown)
+        #expect(workspace.state == .running)
+    }
+
+    @Test func doctorRejectsInvalidCursorJSON() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-cursor-badjson")
+        defer { cleanup() }
+        let installer = HookInstaller(
+            configRoot: temp,
+            forwarderBinaryPath: URL(fileURLWithPath: "\(temp.path)/bin/nocturnal-hook-forwarder"),
+            socketPath: URL(fileURLWithPath: "\(temp.path)/ipc.sock"),
+            backupsDirectory: temp.appendingPathComponent("backups", isDirectory: true)
+        )
+        let native = installer.nativeConfigURL(for: .cursor)
+        try FileManager.default.createDirectory(
+            at: native.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        // Marker strings present, but not valid JSON.
+        let broken = """
+        { "version": 1, "hooks": { "sessionStart": [{ "command": "nocturnal-hook-forwarder --wrap-source cursor \(temp.path)/ipc.sock" }]
+        """
+        try broken.write(to: native, atomically: true, encoding: .utf8)
+        let doctor = installer.doctor(product: .cursor)
+        #expect(doctor.succeeded == false)
+        #expect(doctor.message.lowercased().contains("invalid"))
+    }
+
     @Test func compositeRoutesCursorSource() {
         let composite = CompositeEventDecoder()
         let decoded = composite.decode(

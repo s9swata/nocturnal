@@ -172,7 +172,8 @@ public struct HumanizedActivityLine: Sendable, Equatable, Hashable {
         if verbBudget >= limit {
             return HumanizedActivityLine(verb: Self.clip(verb, limit: limit))
         }
-        let detailLimit = max(4, limit - verbBudget)
+        // Honor `limit` strictly — never force a 4-char minimum that overruns.
+        let detailLimit = limit - verbBudget
         return HumanizedActivityLine(verb: verb, detail: Self.clip(detail, limit: detailLimit))
     }
 
@@ -181,9 +182,10 @@ public struct HumanizedActivityLine: Sendable, Equatable, Hashable {
         case .approval:
             return makeApproval(activity)
         case .question:
+            // Freeform prompts may contain `/` (URLs, paths in text) — not filenames.
             return HumanizedActivityLine(
                 verb: "Question",
-                detail: compactPathish(activity.detail ?? activity.label, limit: 42)
+                detail: compactCommand(activity.detail ?? activity.label, limit: 42)
             )
         case .turn:
             let label = activity.label.trimmingCharacters(in: .whitespacesAndNewlines)

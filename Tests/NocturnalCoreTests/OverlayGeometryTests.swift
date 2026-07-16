@@ -180,6 +180,7 @@ struct OverlayGeometryTests {
             gap: 0,
             edgeInset: OverlayGeometry.screenEdgeInset
         )
+        #expect(frame.size == size)
         #expect(frame.minX >= screen.minX + OverlayGeometry.screenEdgeInset - 0.5)
         #expect(frame.maxX <= screen.maxX - OverlayGeometry.screenEdgeInset + 0.5)
         #expect(abs(frame.maxY - screen.maxY) < 0.5)

@@ -117,28 +117,22 @@ public enum PillIslandPresentation: Sendable {
                 let tool = approval.toolName
                 let detail = (approval.detail ?? approval.summary)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
+                // primaryLine matches primary ("Approve <tool>"); command stays on secondary.
+                primary = "Approve \(HumanizedActivityLine.prettyToken(tool))"
+                primaryLine = HumanizedActivityLine(
+                    verb: "Approve",
+                    detail: HumanizedActivityLine.prettyToken(tool)
+                )
                 if !detail.isEmpty, detail.caseInsensitiveCompare(tool) != .orderedSame {
-                    primary = "Approve \(HumanizedActivityLine.prettyToken(tool))"
                     secondary = truncate(detail, 42)
-                    primaryLine = HumanizedActivityLine(
-                        verb: "Approve",
-                        detail: HumanizedActivityLine.compactCommand(detail, limit: 36)
-                    )
                 } else {
-                    primary = "Approve \(HumanizedActivityLine.prettyToken(tool))"
                     secondary = agent
-                    primaryLine = HumanizedActivityLine(
-                        verb: "Approve",
-                        detail: HumanizedActivityLine.prettyToken(tool)
-                    )
                 }
             } else if let question = session.pendingQuestion {
+                // Verb-only primary row; prompt lives on secondary (no double render).
                 primary = "Question"
                 secondary = truncate(question.prompt, 42)
-                primaryLine = HumanizedActivityLine(
-                    verb: "Question",
-                    detail: truncate(question.prompt, 42)
-                )
+                primaryLine = HumanizedActivityLine(verb: "Question")
             } else if session.state == .failed {
                 let live = session.liveStatusLine
                 primary = live.isEmpty ? "Failed" : truncate(live, 40)

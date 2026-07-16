@@ -126,7 +126,11 @@ struct SessionRowView: View {
 
             // Inline detail (last signal + timeline) under this row only.
             if isExpanded {
-                SessionTimelineView(session: session, compact: true)
+                SessionTimelineView(
+                    session: session,
+                    compact: true,
+                    prefersReducedMotion: reduceMotion
+                )
                     .padding(.leading, 28)
                     .padding(.trailing, 8)
                     .padding(.bottom, 8)

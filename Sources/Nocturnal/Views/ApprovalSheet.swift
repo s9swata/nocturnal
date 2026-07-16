@@ -298,9 +298,13 @@ struct QuestionSheet: View {
                 .focused($answerFocused)
                 .disabled(isSubmitting)
                 .onChange(of: answerText) { _, newValue in
-                    if useOther || prompt.choices.isEmpty {
+                    // Editing freeform into an exact listed choice must select that choice.
+                    if prompt.choices.contains(newValue) {
+                        selectedChoice = newValue
+                        useOther = false
+                    } else if useOther || prompt.choices.isEmpty {
                         selectedChoice = nil
-                    } else if !prompt.choices.contains(newValue) {
+                    } else {
                         useOther = prompt.allowFreeform
                         selectedChoice = nil
                     }

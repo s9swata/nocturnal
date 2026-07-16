@@ -118,11 +118,16 @@ public struct GrokEventDecoder: EventDecoding, Sendable {
             let tool = Self.toolName(from: payload) ?? "tool"
             result.summaryHint = result.summaryHint ?? "Finished \(tool)"
 
-        case "PostToolUseFailure", "PermissionDenied", "StopFailure":
+        case "PostToolUseFailure", "PermissionDenied":
             result.state = .running
             let tool = Self.toolName(from: payload) ?? "tool"
             result.summaryHint = result.summaryHint
                 ?? (type == "PermissionDenied" ? "Denied \(tool)" : "Failed \(tool)")
+
+        case "StopFailure":
+            // Terminal failure — session is done, not still live.
+            result.state = .failed
+            result.summaryHint = result.summaryHint ?? "Stop failed"
 
         case "Stop", "SubagentStop", "turn.completed":
             result.state = .idle
@@ -169,12 +174,16 @@ public struct GrokEventDecoder: EventDecoding, Sendable {
         case "session_end", "sessionEnd": return "SessionEnd"
         case "user_prompt_submit", "beforeSubmitPrompt", "userPromptSubmit": return "UserPromptSubmit"
         case "pre_tool_use", "preToolUse",
-             "beforeShellExecution", "beforeMCPExecution", "beforeReadFile":
+             "beforeShellExecution", "beforeMCPExecution", "beforeReadFile",
+             "beforeTabFileRead":
             return "PreToolUse"
         case "post_tool_use", "postToolUse",
              "afterShellExecution", "afterMCPExecution", "afterFileEdit",
+             "afterTabFileEdit",
              "afterAgentResponse", "afterAgentThought":
             return "PostToolUse"
+        case "workspaceOpen":
+            return "SessionStart"
         case "post_tool_use_failure", "postToolUseFailure": return "PostToolUseFailure"
         case "stop", "stop_failure", "stopFailure": return raw == "stopFailure" || raw == "stop_failure"
             ? "StopFailure" : "Stop"

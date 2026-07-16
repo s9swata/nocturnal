@@ -128,13 +128,24 @@ struct SetupMain {
             let output = String(data: data, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if process.terminationStatus == 0, !output.isEmpty {
-                let verification = output.contains("0.144.1")
+                let verification = Self.codexVersionIsVerifiedTarget(output)
                     ? "schema verified"
                     : "schema compatibility unverified"
                 return "\(output) (\(verification); adapter target 0.144.1)"
             }
         } catch {}
         return "Codex version unavailable (adapter target 0.144.1)"
+    }
+
+    /// Exact version token match for adapter target (rejects `0.144.10` substring hits).
+    private static func codexVersionIsVerifiedTarget(_ output: String) -> Bool {
+        let target = "0.144.1"
+        // Match a version-like token that is exactly the target, not a longer prefix.
+        let pattern = #"\b0\.144\.1\b"#
+        return output.range(of: pattern, options: .regularExpression) != nil
+            || output.trimmingCharacters(in: .whitespacesAndNewlines) == target
+            || output.hasSuffix(" \(target)")
+            || output.hasSuffix("/\(target)")
     }
 
     /// Auto-discover forwarder when `--forwarder` is omitted (not when value is missing).

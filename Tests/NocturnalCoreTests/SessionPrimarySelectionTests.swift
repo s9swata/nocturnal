@@ -157,6 +157,29 @@ struct SessionPrimarySelectionTests {
         #expect(primary?.id.rawValue == "019f6b87-a207-7292-89eb-52d72bca033e")
     }
 
+    @Test func staleRunningOpenCodeToolsDoNotBeatLiveGrokWithoutTools() {
+        // Repro: OpenCode stuck in `.running` with hour-old tools must not pin tier 4.
+        let openCode = session(
+            id: "oc-zombie",
+            source: .opencode,
+            state: .running,
+            updatedAt: now.addingTimeInterval(-45 * 60),
+            lastTool: "edit",
+            recentToolAt: now.addingTimeInterval(-45 * 60)
+        )
+        let grok = session(
+            id: "grok-live",
+            source: .grokBuild,
+            state: .running,
+            updatedAt: now
+        )
+        let primary = SessionPrimarySelection.primaryLive(
+            from: [openCode, grok],
+            now: now
+        )
+        #expect(primary?.source == .grokBuild)
+    }
+
     @Test func recentIdleToolsStillWinOverBareRunningWithinMaxAge() {
         let openCode = session(
             id: "oc-recent",

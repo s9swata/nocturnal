@@ -16,6 +16,15 @@ struct ToolPayloadAndDetailTests {
         #expect(extracted.integration == .shell)
     }
 
+    @Test func bareStringToolInputCamelCaseBecomesDetail() {
+        let payload: [String: JSONValue] = [
+            "tool_name": .string("web_search"),
+            "toolInput": .string("nocturnal dynamic island"),
+        ]
+        let extracted = ToolPayloadExtraction.extract(from: payload)
+        #expect(extracted.detail == "nocturnal dynamic island")
+    }
+
     @Test func extractsPathAndEditIntegration() {
         let payload: [String: JSONValue] = [
             "tool_name": .string("Edit"),

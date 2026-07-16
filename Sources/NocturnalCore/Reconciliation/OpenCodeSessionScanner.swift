@@ -143,10 +143,10 @@ public struct OpenCodeSessionScanner: Sendable {
         // Read-only safety for concurrent writers.
         _ = sqlite3_exec(db, "PRAGMA query_only = ON;", nil, nil, nil)
 
+        // Core columns only — metric column names vary across OpenCode builds.
+        // A prepare failure here used to silently skip the entire SQLite path.
         let sql = """
-        SELECT id, title, directory, time_updated,
-               tokens_input, tokens_output,
-               summary_additions, summary_deletions, summary_files
+        SELECT id, title, directory, time_updated
         FROM session
         WHERE time_archived IS NULL OR time_archived = 0
         ORDER BY time_updated DESC
@@ -157,7 +157,8 @@ public struct OpenCodeSessionScanner: Sendable {
             return []
         }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_int(stmt, 1, Int32(maxSessions))
+        let limit = Int32(clamping: maxSessions)
+        sqlite3_bind_int(stmt, 1, max(0, limit))
 
         var out: [OpenCodeSessionSnapshot] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
@@ -166,16 +167,6 @@ public struct OpenCodeSessionScanner: Sendable {
             let title = sqlite3_column_text(stmt, 1).map { String(cString: $0) }
             let directory = sqlite3_column_text(stmt, 2).map { String(cString: $0) }
             let updatedMs = sqlite3_column_int64(stmt, 3)
-            let tokensIn = sqlite3_column_type(stmt, 4) == SQLITE_NULL
-                ? nil : Int(sqlite3_column_int64(stmt, 4))
-            let tokensOut = sqlite3_column_type(stmt, 5) == SQLITE_NULL
-                ? nil : Int(sqlite3_column_int64(stmt, 5))
-            let additions = sqlite3_column_type(stmt, 6) == SQLITE_NULL
-                ? nil : Int(sqlite3_column_int64(stmt, 6))
-            let deletions = sqlite3_column_type(stmt, 7) == SQLITE_NULL
-                ? nil : Int(sqlite3_column_int64(stmt, 7))
-            let files = sqlite3_column_type(stmt, 8) == SQLITE_NULL
-                ? nil : Int(sqlite3_column_int64(stmt, 8))
 
             let ts = EventEnvelopeDateParsing.parseEpoch(Double(updatedMs)) ?? Date()
             out.append(
@@ -184,11 +175,11 @@ public struct OpenCodeSessionScanner: Sendable {
                     title: title,
                     workingDirectory: directory,
                     timestamp: ts,
-                    tokensIn: tokensIn,
-                    tokensOut: tokensOut,
-                    diffAdded: additions,
-                    diffRemoved: deletions,
-                    filesTouched: files,
+                    tokensIn: nil,
+                    tokensOut: nil,
+                    diffAdded: nil,
+                    diffRemoved: nil,
+                    filesTouched: nil,
                     storagePath: dbURL.path
                 )
             )
@@ -231,10 +222,11 @@ public struct OpenCodeSessionScanner: Sendable {
             candidates.append((url, values.contentModificationDate ?? .distantPast))
         }
 
-        return try candidates
+        // Fail-open per file: one corrupt session must not hide the rest.
+        return candidates
             .sorted { $0.modified > $1.modified }
             .prefix(maxSessions)
-            .compactMap { try snapshotFromJSON(at: $0.url) }
+            .compactMap { try? snapshotFromJSON(at: $0.url) }
     }
 
     private func snapshotFromJSON(at url: URL) throws -> OpenCodeSessionSnapshot? {

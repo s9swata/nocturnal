@@ -26,7 +26,7 @@ Also written under `static/icons/{production,staging,dev}/`:
 
 - `favicon.ico`, `icon-*.png`, `apple-touch-icon.png`
 - `site.webmanifest` (name includes stage)
-- `static/head-icons.html` — stage-aware `<head>` snippet
+- `static/icons/head-icons.html` — stage-aware `<head>` snippet
 - `static/icons/verify.html` — open in a browser to confirm the **tab** icon flips per stage
 
 ```bash

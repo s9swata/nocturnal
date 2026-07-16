@@ -40,6 +40,35 @@ struct PillIslandPresentationTests {
         #expect(content.mode == .attention)
         #expect(content.primary.contains("Approve"))
         #expect(content.source == .codex)
+        // primaryLine matches primary tool row; command stays on secondary only.
+        #expect(content.primaryLine?.verb == "Approve")
+        #expect(content.primaryLine?.detail?.lowercased().contains("bash") == true)
+        #expect(content.secondary?.contains("git push") == true)
+    }
+
+    @Test func attentionModeForQuestionKeepsPromptOnSecondary() {
+        var session = Session(
+            id: SessionID("s-q"),
+            source: .claude,
+            state: .waitingForInput,
+            title: "Q",
+            createdAt: now,
+            updatedAt: now
+        )
+        session.pendingQuestion = QuestionPrompt(
+            id: "q1",
+            sessionId: SessionID("s-q"),
+            prompt: "Which branch should we use?"
+        )
+        let content = PillIslandPresentation.content(
+            sessions: [session],
+            socketRunning: true
+        )
+        #expect(content.mode == .attention)
+        #expect(content.primary == "Question")
+        #expect(content.primaryLine?.verb == "Question")
+        #expect(content.primaryLine?.detail == nil)
+        #expect(content.secondary?.contains("branch") == true)
     }
 
     @Test func liveExpandedWhenToolAndPathPresent() {

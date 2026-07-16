@@ -1,19 +1,34 @@
 # Bidirectional permission path — design
 
 **Date:** 2026-07-16  
-**Status:** Design / implement next  
+**Status:** Core shipped; remaining polish / product-specific hardening  
 **Goal:** Approving or denying in Nocturnal actually unblocks or blocks Codex (and Claude) instead of only writing local response files.
 
 ---
 
-## 1. Why it fails today
+## 1. Shipped core (no longer “future work”)
 
-| Layer | Today | Needed |
-|-------|--------|--------|
-| Codex `PermissionRequest` hook | `nocturnal-hook-forwarder` runs, forwards stdin → socket, **always prints `{}`**, **always exits 0** | Print **allow/deny JSON** on stdout before exit |
-| Codex reads | Stdout of the hook command | Official `hookSpecificOutput.decision` |
-| Nocturnal Approve UI | Writes `responses/records/` + sidecars; updates local session | **Also** answers the **blocked** forwarder process |
-| Timing | Forwarder returns in &lt;1s (observer) | Forwarder **waits** (with timeout) for user decision |
+Implemented in-tree today:
+
+- `PermissionBroker` + `HookDecisionTranslator` + decision-mode socket RPC
+- `FailOpenHookForwarder.forwardWithDecision` waits on `PermissionRequest` and prints allow/deny JSON (or `{}` on timeout)
+- OpenCode HTTP permission replies via `OpenCodePermissionClient`
+- Inline island Deny/Allow for adapters with decision transport
+
+### Historical gap (solved)
+
+| Layer | Was | Now |
+|-------|-----|-----|
+| Codex `PermissionRequest` | Always `{}` | Decision JSON on stdout when UI answers |
+| Nocturnal Approve UI | Response files only | Completes broker + optional HTTP/file transports |
+| Timing | Instant exit | Bounded wait (`decisionTimeout`) |
+
+### Still open (focus remaining work here)
+
+- UI copy / always-allow affordances (§5.4)
+- Claude-specific translator edge cases
+- Enterprise fail-closed settings
+- Correlation hardening across product-specific id fields
 
 Official Codex docs ([Hooks](https://learn.chatgpt.com/docs/hooks)):
 

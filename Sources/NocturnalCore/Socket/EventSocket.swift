@@ -100,12 +100,16 @@ public actor EventSocketServer {
         return stream
     }
 
-    public func stop() {
+    public func stop() async {
         isRunning = false
         acceptTask?.cancel()
         acceptTask = nil
         listener?.close()
         listener = nil
+        // Resume any permission waits before closing FDs — Task.cancel does not
+        // resume PermissionBroker.wait, and a late write to a reused descriptor
+        // would corrupt a new connection.
+        await permissionBroker.cancelAll(with: .deferred)
         // Shutdown then close client fds so off-actor blocking reads unblock promptly.
         // `close` alone can leave a peer `read` blocked on some Darwin kernels;
         // `shutdown(SHUT_RDWR)` forces EOF/error on the blocked reader first.

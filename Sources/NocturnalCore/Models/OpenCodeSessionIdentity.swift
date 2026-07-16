@@ -135,8 +135,13 @@ public enum OpenCodeSessionIdentity: Sendable {
         if session.currentActivity?.isActive == true {
             var activity = session.currentActivity
             activity?.endedAt = now
+            if let finished = activity {
+                session.recentActivities.insert(finished, at: 0)
+                if session.recentActivities.count > 12 {
+                    session.recentActivities = Array(session.recentActivities.prefix(12))
+                }
+            }
             session.currentActivity = nil
-            _ = activity
         } else {
             session.currentActivity = nil
         }

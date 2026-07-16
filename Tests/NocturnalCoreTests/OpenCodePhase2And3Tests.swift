@@ -80,19 +80,20 @@ struct OpenCodePhase2And3Tests {
         #expect(decoded.inferredSource == .opencode)
     }
 
-    @Test func pluginSourceMentionsPhase2DecisionPath() {
+    @Test func pluginSourceMentionsPhase2DecisionPath() throws {
         let installer = HookInstaller(
             configRoot: URL(fileURLWithPath: "/tmp"),
             forwarderBinaryPath: URL(fileURLWithPath: "/tmp/fwd"),
             socketPath: URL(fileURLWithPath: "/tmp/n.sock"),
             backupsDirectory: URL(fileURLWithPath: "/tmp/b")
         )
-        let src = installer.openCodePluginSource()
+        let src = try installer.openCodePluginSource()
         #expect(src.contains("sendAndWaitDecision") || src.contains("permission.ask"))
         #expect(src.contains("replyOpenCodePermission") || src.contains("postSessionIdPermissionsPermissionId"))
         #expect(src.contains("permission.ask") || src.contains("permission.asked"))
         #expect(src.contains("nocturnalNeedsDecision") || src.contains("PermissionRequest"))
         #expect(src.contains("/tmp/n.sock") || src.contains("SOCKET_PATH"))
+        #expect(src.contains("v3-fallback") == false)
     }
 
     // MARK: - Phase 3 session scanner

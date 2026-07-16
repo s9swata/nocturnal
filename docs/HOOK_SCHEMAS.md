@@ -288,10 +288,12 @@ Use Codex, Claude, and OpenCode fixtures under `Fixtures/` with the live socket 
 3. **Always** normalizes each line through `EnvelopeNormalizer` into a canonical `EventEnvelope` before socket send (optional `--wrap-source` only sets the default source hint). Raw upstream JSON is never sent as-is — `EventSocket` would soft-decode it to `eventType`/`sessionId` defaults
 4. Attempts connect (default 0.5s timeout) + write to socket
 5. **Always exits 0**
-6. Prints `{}` so Codex hooks that parse stdout receive an empty success response
+6. **Stdout contract (conditional):**
+   - **Non-decision events** (SessionStart, PreToolUse observer, tools, Stop, …): print `{}` so agents that parse stdout get an empty success body.
+   - **Decision events** (`PermissionRequest`, Claude permission-gated PreToolUse when decision-mode is on): wait for Nocturnal UI (bounded timeout), then print **allow/deny JSON** (`hookSpecificOutput…`) so Codex/Claude can unblock. On timeout or Nocturnal down, print `{}` (fail-open) unless `failClosedOnTimeout` is set.
 7. Optional debug: `NOCTURNAL_FORWARDER_DEBUG=1`
 
-Agents must not block on Nocturnal availability.
+Agents must not block forever on Nocturnal availability (decision wait is capped).
 
 ### Setup CLI parse rules
 

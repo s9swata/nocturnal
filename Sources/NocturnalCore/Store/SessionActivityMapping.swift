@@ -93,12 +93,41 @@ public enum SessionActivityMapping: Sendable {
                 diffRemoved: extracted.diffRemoved
             )
             if var current = session.currentActivity, current.kind == .tool {
-                current.outcome = extracted.outcome ?? .success
-                current.endedAt = at
-                if current.command == nil { current.command = extracted.command }
-                if current.primaryPath == nil { current.primaryPath = extracted.path }
-                session.currentActivity = current
-                SessionActivityPolicy.endCurrent(on: &session, at: at)
+                let completedName = extracted.toolName.map(Session.normalizedToolName)
+                let currentName = Session.normalizedToolName(current.toolName ?? current.label)
+                // Overlapping tools: only end the current activity when names match
+                // (or completion lacks a name). Mismatched completions archive alone.
+                let namesMatch = completedName == nil
+                    || completedName?.isEmpty == true
+                    || completedName == currentName
+                if namesMatch {
+                    current.outcome = extracted.outcome ?? .success
+                    current.endedAt = at
+                    if current.command == nil { current.command = extracted.command }
+                    if current.primaryPath == nil { current.primaryPath = extracted.path }
+                    session.currentActivity = current
+                    SessionActivityPolicy.endCurrent(on: &session, at: at)
+                } else if let tool = extracted.toolName {
+                    let finished = SessionActivity(
+                        kind: .tool,
+                        label: tool,
+                        detail: extracted.detail ?? "Finished",
+                        eventType: type,
+                        startedAt: at,
+                        endedAt: at,
+                        toolName: tool,
+                        primaryPath: extracted.path,
+                        command: extracted.command,
+                        integration: extracted.integration,
+                        outcome: extracted.outcome ?? .success
+                    )
+                    session.recentActivities.insert(finished, at: 0)
+                    if session.recentActivities.count > SessionActivityPolicy.maxRecent {
+                        session.recentActivities = Array(
+                            session.recentActivities.prefix(SessionActivityPolicy.maxRecent)
+                        )
+                    }
+                }
             } else if let tool = extracted.toolName {
                 let finished = SessionActivity(
                     kind: .tool,
@@ -177,9 +206,11 @@ public enum SessionActivityMapping: Sendable {
             )
 
         case "session.started", "SessionStart":
+            // Lifecycle shell only — not a model turn. Keeps notch tier-3
+            // (active turn) free for real agent.turn.started / thinking work.
             SessionActivityPolicy.setCurrent(
                 SessionActivity(
-                    kind: .turn,
+                    kind: .session,
                     label: "Session",
                     detail: decoded.titleHint,
                     eventType: type,

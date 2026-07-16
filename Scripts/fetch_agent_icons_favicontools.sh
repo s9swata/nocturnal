@@ -45,9 +45,11 @@ mcp_generate 2 "simple-icons:claude" "$WORKDIR/claude.json"
 mcp_generate 3 "simple-icons:cursor" "$WORKDIR/cursor.json"
 mcp_generate 4 "simple-icons:opencode" "$WORKDIR/opencode.json"
 
-GROK_SRC="${GROK_LOGO:-$HOME/Documents/Design Assets/Typography/icon-1024x1024.png}"
-if [[ -f "$GROK_SRC" ]]; then
-  python3 - "$GROK_SRC" "$WORKDIR/grok.json" <<'PY'
+# Grok: opt-in only. The file is base64-uploaded to favicontools — never default
+# to a personal path under ~/Documents.
+if [[ -n "${GROK_LOGO:-}" && -f "${GROK_LOGO}" ]]; then
+  echo "Uploading GROK_LOGO=$GROK_LOGO to favicontools…" >&2
+  python3 - "$GROK_LOGO" "$WORKDIR/grok.json" <<'PY'
 import base64, json, pathlib, sys, urllib.request
 src = pathlib.Path(sys.argv[1]).read_bytes()
 data_url = "data:image/png;base64," + base64.b64encode(src).decode()
@@ -77,7 +79,7 @@ with urllib.request.urlopen(req, timeout=120) as r:
 print("ok grok")
 PY
 else
-  echo "WARNING: Grok logo not found at $GROK_SRC — skipping grok" >&2
+  echo "INFO: set GROK_LOGO=/path/to/logo.png to refresh Grok icon (file is uploaded to favicontools)" >&2
 fi
 
 python3 - "$WORKDIR" "$ROOT" <<'PY'

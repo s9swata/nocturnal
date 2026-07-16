@@ -148,37 +148,68 @@ public enum HookDecisionTranslator: Sendable {
 
     private static func allowJSON(eventType: String, source: AgentSource) -> String {
         if eventType == "PreToolUse" || (source == .claude && eventType != "PermissionRequest") {
-            return #"{"hookSpecificOutput":{"hookEventName":"\#(escape(eventType))","permissionDecision":"allow","permissionDecisionReason":"Approved in Nocturnal"}}"#
+            return jsonObject([
+                "hookSpecificOutput": [
+                    "hookEventName": eventType,
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": "Approved in Nocturnal",
+                ] as [String: Any],
+            ])
         }
-        return #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#
+        return jsonObject([
+            "hookSpecificOutput": [
+                "hookEventName": "PermissionRequest",
+                "decision": ["behavior": "allow"] as [String: Any],
+            ] as [String: Any],
+        ])
     }
 
     private static func denyJSON(eventType: String, source: AgentSource, message: String) -> String {
-        let msg = escape(message)
         if eventType == "PreToolUse" || (source == .claude && eventType != "PermissionRequest") {
-            return #"{"hookSpecificOutput":{"hookEventName":"\#(escape(eventType))","permissionDecision":"deny","permissionDecisionReason":"\#(msg)"}}"#
+            return jsonObject([
+                "hookSpecificOutput": [
+                    "hookEventName": eventType,
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": message,
+                ] as [String: Any],
+            ])
         }
-        return #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"\#(msg)"}}}"#
+        return jsonObject([
+            "hookSpecificOutput": [
+                "hookEventName": "PermissionRequest",
+                "decision": [
+                    "behavior": "deny",
+                    "message": message,
+                ] as [String: Any],
+            ] as [String: Any],
+        ])
     }
 
-    private static func escape(_ s: String) -> String {
-        s
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\n", with: "\\n")
-            .replacingOccurrences(of: "\r", with: "\\r")
+    /// Full JSON serialization so control characters (tabs, etc.) never break stdout.
+    private static func jsonObject(_ object: [String: Any]) -> String {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8)
+        else {
+            return "{}"
+        }
+        return text
     }
 }
 
 /// In-process registry: socket handlers wait; UI completes.
 public actor PermissionBroker {
-    private var waiters: [String: CheckedContinuation<PermissionDecisionResult, Never>] = [:]
+    private var waiters: [String: [CheckedContinuation<PermissionDecisionResult, Never>]] = [:]
+    private var timeoutTasks: [String: Task<Void, Never>] = [:]
     /// Completions that arrived before ``wait`` (always-allow race).
     private var early: [String: PermissionDecisionResult] = [:]
 
     public init() {}
 
     /// Wait for a UI decision or return early completion / defer on timeout.
+    ///
+    /// Multiple waiters may share one correlation id; all resume with the same
+    /// result so concurrent hooks are not left blocked when the first is overwritten.
     public func wait(
         for decisionRequestId: String,
         timeoutSeconds: TimeInterval
@@ -189,20 +220,26 @@ public actor PermissionBroker {
         }
 
         return await withCheckedContinuation { (continuation: CheckedContinuation<PermissionDecisionResult, Never>) in
-            waiters[id] = continuation
-            let timeout = max(1, timeoutSeconds)
-            Task { [weak self] in
-                let ns = UInt64(min(timeout, 600) * 1_000_000_000)
-                try? await Task.sleep(nanoseconds: ns)
-                await self?.timeout(id: id)
+            waiters[id, default: []].append(continuation)
+            if timeoutTasks[id] == nil {
+                let timeout = max(1, timeoutSeconds)
+                timeoutTasks[id] = Task { [weak self] in
+                    let ns = UInt64(min(timeout, 600) * 1_000_000_000)
+                    try? await Task.sleep(nanoseconds: ns)
+                    guard !Task.isCancelled else { return }
+                    await self?.timeout(id: id)
+                }
             }
         }
     }
 
     public func complete(decisionRequestId: String, result: PermissionDecisionResult) {
         let id = decisionRequestId
-        if let waiter = waiters.removeValue(forKey: id) {
-            waiter.resume(returning: result)
+        cancelTimeout(id: id)
+        if let list = waiters.removeValue(forKey: id), !list.isEmpty {
+            for waiter in list {
+                waiter.resume(returning: result)
+            }
         } else {
             early[id] = result
             if early.count > 64 {
@@ -222,8 +259,34 @@ public actor PermissionBroker {
         complete(decisionRequestId: approvalRequestId, result: result)
     }
 
+    /// Resume every pending waiter (e.g. socket ``stop``) so no task stays suspended
+    /// after client descriptors are closed.
+    public func cancelAll(with result: PermissionDecisionResult = .deferred) {
+        let pending = waiters
+        waiters.removeAll()
+        for (id, list) in pending {
+            cancelTimeout(id: id)
+            for waiter in list {
+                waiter.resume(returning: result)
+            }
+        }
+        for task in timeoutTasks.values {
+            task.cancel()
+        }
+        timeoutTasks.removeAll()
+        early.removeAll(keepingCapacity: true)
+    }
+
     private func timeout(id: String) {
-        guard let waiter = waiters.removeValue(forKey: id) else { return }
-        waiter.resume(returning: .deferred)
+        cancelTimeout(id: id)
+        guard let list = waiters.removeValue(forKey: id) else { return }
+        for waiter in list {
+            waiter.resume(returning: .deferred)
+        }
+    }
+
+    private func cancelTimeout(id: String) {
+        timeoutTasks[id]?.cancel()
+        timeoutTasks[id] = nil
     }
 }

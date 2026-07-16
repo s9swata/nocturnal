@@ -255,6 +255,8 @@ final class AppModel {
 
     private func reconcileLocalCodexSessions() async {
         let scanner = CodexTranscriptScanner.resolve()
+        let readLogs = settings.readLocalAgentLogs
+        let reader = detailReader
         do {
             let snapshots = try await withThrowingTaskGroup(
                 of: [CodexTranscriptSnapshot].self
@@ -262,16 +264,28 @@ final class AppModel {
                 group.addTask { try scanner.scan() }
                 return try await group.next() ?? []
             }
+            // Parse tails off the UI actor; apply snapshots back on the store.
+            let details: [SessionDetailSnapshot] = readLogs
+                ? await withTaskGroup(of: SessionDetailSnapshot?.self) { group in
+                    for snapshot in snapshots {
+                        let path = snapshot.transcriptPath
+                        let sid = SessionID(snapshot.sessionId)
+                        group.addTask {
+                            reader.read(sessionId: sid, transcriptPath: path)
+                        }
+                    }
+                    var out: [SessionDetailSnapshot] = []
+                    for await detail in group {
+                        if let detail { out.append(detail) }
+                    }
+                    return out
+                }
+                : []
             for snapshot in snapshots {
                 _ = await store.apply(snapshot.envelope())
-                if settings.readLocalAgentLogs {
-                    if let detail = detailReader.read(
-                        sessionId: SessionID(snapshot.sessionId),
-                        transcriptPath: snapshot.transcriptPath
-                    ) {
-                        _ = await store.applyDetailSnapshot(detail)
-                    }
-                }
+            }
+            for detail in details {
+                _ = await store.applyDetailSnapshot(detail)
             }
         } catch {
             // Optional catch-up; fail-open.

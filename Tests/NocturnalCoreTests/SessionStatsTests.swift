@@ -224,9 +224,13 @@ struct SessionStatsTests {
             detail: "npm test",
             eventType: "PreToolUse",
             startedAt: started,
-            endedAt: ended
+            endedAt: ended,
+            toolName: "shell",
+            command: "npm test",
+            integration: .shell
         )
-        #expect(activity.verbToken == "shell")
+        // Humanized shell verbs use past/present tense, not the raw tool name.
+        #expect(activity.verbToken == "Ran" || activity.verbToken == "Running")
         #expect(activity.durationDescription == "1m")
         #expect(!session.ageDescription.isEmpty)
     }

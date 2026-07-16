@@ -45,7 +45,7 @@ public enum CanonicalAgentEvent: String, Sendable, Codable, Hashable, CaseIterab
             return sessionStarted.rawValue
         case "session.updated":
             return sessionUpdated.rawValue
-        case "session.completed", "Stop":
+        case "session.completed", "Stop", "SessionEnd":
             return sessionCompleted.rawValue
         case "session.failed":
             return sessionFailed.rawValue
