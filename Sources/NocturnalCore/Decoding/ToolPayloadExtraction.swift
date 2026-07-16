@@ -41,8 +41,10 @@ public enum ToolPayloadExtraction: Sendable {
 
     public static func extract(from payload: [String: JSONValue]) -> Extracted {
         let tool = EventDecodeHelpers.string(payload, "tool_name", "tool", "name", "toolName")
-        // OpenCode plugin hooks use `args`; Codex/Claude use tool_input / input.
+        // OpenCode plugin hooks use `args`; Codex/Claude use tool_input / input;
+        // Grok Build uses camelCase `toolInput`.
         let toolInput = payload["tool_input"]?.objectValue
+            ?? payload["toolInput"]?.objectValue
             ?? payload["input"]?.objectValue
             ?? payload["arguments"]?.objectValue
             ?? payload["args"]?.objectValue
@@ -75,7 +77,11 @@ public enum ToolPayloadExtraction: Sendable {
             )
         }
         // Some Read tools put the path as a bare string tool_input.
-        if path == nil, case .string(let s)? = payload["tool_input"] ?? payload["input"] {
+        if path == nil,
+           case .string(let s)? = payload["tool_input"]
+            ?? payload["toolInput"]
+            ?? payload["input"]
+        {
             let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
             if t.contains("/") || t.hasSuffix(".swift") || t.hasSuffix(".md") || t.hasSuffix(".json") {
                 path = t

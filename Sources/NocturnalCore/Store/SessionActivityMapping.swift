@@ -13,7 +13,11 @@ public enum SessionActivityMapping: Sendable {
     ) {
         guard allowLifecycleMutation else { return }
 
-        let type = envelope.eventType
+        // Grok (and Cursor-compat) emit snake_case / camelCase hookEventName;
+        // product decoders accept those, but activity mapping historically only
+        // matched PascalCase — so Grok tools never became "meaningful" and stale
+        // OpenCode tool rows kept owning the notch.
+        let type = normalizeEventType(envelope.eventType)
         let payload = envelope.payload
         let at = envelope.timestamp
         let extracted = ToolPayloadExtraction.extract(from: payload)
@@ -60,7 +64,7 @@ public enum SessionActivityMapping: Sendable {
         }
 
         switch type {
-        case "PreToolUse":
+        case "PreToolUse", "tool.started":
             let tool = extracted.toolName ?? "tool"
             applyToolStart(to: &session, tool: tool, extracted: extracted, eventType: type, at: at)
             session.stats.toolUseCount += 1
@@ -78,7 +82,7 @@ public enum SessionActivityMapping: Sendable {
                 diffRemoved: extracted.diffRemoved
             )
 
-        case "PostToolUse":
+        case "PostToolUse", "PostToolUseFailure", "tool.completed":
             if let path = extracted.path {
                 session.stats.recordTouchedPath(path)
             }
@@ -146,7 +150,7 @@ public enum SessionActivityMapping: Sendable {
             SessionActivityPolicy.endCurrent(on: &session, at: at)
             // Leave current empty so UI keeps showing last tool / prompt, not "Working".
 
-        case "agent.turn.started", "UserPromptSubmit":
+        case "agent.turn.started", "UserPromptSubmit", "turn.started":
             let detail = EventDecodeHelpers.string(payload, "prompt", "text", "message")
             SessionActivityPolicy.setCurrent(
                 SessionActivity(
@@ -163,7 +167,7 @@ public enum SessionActivityMapping: Sendable {
                 tokensOut: extracted.tokensOut
             )
 
-        case "agent.turn.completed", "Stop", "SubagentStop":
+        case "agent.turn.completed", "Stop", "SubagentStop", "turn.completed":
             SessionActivityPolicy.endCurrent(on: &session, at: at)
             session.stats.mergeMetrics(
                 tokensIn: extracted.tokensIn,
@@ -175,8 +179,8 @@ public enum SessionActivityMapping: Sendable {
         case "session.started", "SessionStart":
             SessionActivityPolicy.setCurrent(
                 SessionActivity(
-                    kind: .session,
-                    label: "Session started",
+                    kind: .turn,
+                    label: "Session",
                     detail: decoded.titleHint,
                     eventType: type,
                     startedAt: at
@@ -333,5 +337,19 @@ public enum SessionActivityMapping: Sendable {
         if collapsed.count <= limit { return collapsed }
         let idx = collapsed.index(collapsed.startIndex, offsetBy: limit - 1)
         return String(collapsed[..<idx]) + "…"
+    }
+
+    /// Map Grok/Cursor/NAP wire names onto the PascalCase cases this mapper owns.
+    public static func normalizeEventType(_ raw: String) -> String {
+        let grok = GrokEventDecoder.normalizeEventType(raw)
+        switch grok {
+        case "tool.started": return "PreToolUse"
+        case "tool.completed": return "PostToolUse"
+        case "turn.started": return "agent.turn.started"
+        case "turn.completed": return "Stop"
+        case "session.started": return "SessionStart"
+        case "session.completed": return "SessionEnd"
+        default: return grok
+        }
     }
 }

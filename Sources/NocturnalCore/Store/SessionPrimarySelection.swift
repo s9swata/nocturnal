@@ -17,6 +17,11 @@ public enum SessionPrimarySelection: Sendable {
     /// has real tool history.
     public static let bareRunningMaxAge: TimeInterval = 90
 
+    /// Idle sessions with only old tool history stop owning the notch after this.
+    /// Prevents a finished OpenCode `edit foo.txt` from outranking a live Grok
+    /// session that has not (yet) emitted tools, for hours.
+    public static let meaningfulMaxAge: TimeInterval = 8 * 60
+
     /// Session that should drive the notch live line.
     public static func primaryLive(
         from sessions: [Session],
@@ -56,10 +61,11 @@ public enum SessionPrimarySelection: Sendable {
 
         let nonRecovery = sessions.filter { !$0.isRecoveryStub }
 
-        // 4) Most recent **meaningful** work (tool history), idle or running.
+        // 4) Most recent **fresh** meaningful work (tool history).
         //    Beats OpenCode soft-running heartbeats with no tools.
+        //    Idle zombies with hour-old tools do **not** win forever.
         if let meaningful = best(
-            nonRecovery.filter { lastMeaningfulActivityAt($0) != nil },
+            nonRecovery.filter { hasFreshMeaningfulActivity($0, now: now) },
             by: { lastMeaningfulActivityAt($0) ?? .distantPast }
         ) {
             return meaningful
@@ -126,6 +132,30 @@ public enum SessionPrimarySelection: Sendable {
             return session.updatedAt
         }
         return nil
+    }
+
+    /// Meaningful history that is still allowed to drive the notch.
+    ///
+    /// Live / attention sessions keep their rank. Idle sessions expire after
+    /// ``meaningfulMaxAge`` so a dead OpenCode tool row cannot pin the island
+    /// while Grok/Codex/Claude is the agent the user is actually in.
+    public static func hasFreshMeaningfulActivity(
+        _ session: Session,
+        now: Date = Date(),
+        maxAge: TimeInterval = SessionPrimarySelection.meaningfulMaxAge
+    ) -> Bool {
+        guard let at = lastMeaningfulActivityAt(session) else { return false }
+        if session.state.needsAttention { return true }
+        if session.state == .running { return true }
+        if let activity = session.currentActivity, activity.isActive {
+            switch activity.kind {
+            case .tool, .turn, .approval, .question:
+                return true
+            case .session, .notification, .unknown:
+                break
+            }
+        }
+        return now.timeIntervalSince(at) < maxAge
     }
 
     private static func best(

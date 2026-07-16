@@ -276,8 +276,9 @@ public struct Session: Identifiable, Codable, Sendable, Hashable {
         let exact: Set<String> = [
             "waiting", "waiting…", "idle", "quiet", "listening",
             "working", "working…", "thinking", "thinking…",
-            "session started", "completed", "cancelled", "unknown",
+            "session started", "session", "grok session", "completed", "cancelled", "unknown",
             "recovered from local codex history", "recovered from local history",
+            "recovered from local grok history", "active grok session (local index)",
         ]
         if exact.contains(lower) { return true }
         if lower.hasPrefix("recovered from local") { return true }

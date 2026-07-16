@@ -133,6 +133,53 @@ struct SessionPrimarySelectionTests {
         #expect(primary?.source == .opencode)
     }
 
+    @Test func staleIdleOpenCodeToolsDoNotBeatLiveGrokWithoutTools() {
+        // Repro: finished OpenCode edit still on notch while Grok is the live session.
+        let openCode = session(
+            id: "oc-stale",
+            source: .opencode,
+            state: .idle,
+            updatedAt: now.addingTimeInterval(-30 * 60),
+            lastTool: "edit",
+            recentToolAt: now.addingTimeInterval(-30 * 60)
+        )
+        let grok = session(
+            id: "019f6b87-a207-7292-89eb-52d72bca033e",
+            source: .grokBuild,
+            state: .running,
+            updatedAt: now
+        )
+        let primary = SessionPrimarySelection.primaryLive(
+            from: [openCode, grok],
+            now: now
+        )
+        #expect(primary?.source == .grokBuild)
+        #expect(primary?.id.rawValue == "019f6b87-a207-7292-89eb-52d72bca033e")
+    }
+
+    @Test func recentIdleToolsStillWinOverBareRunningWithinMaxAge() {
+        let openCode = session(
+            id: "oc-recent",
+            source: .opencode,
+            state: .idle,
+            updatedAt: now.addingTimeInterval(-60),
+            lastTool: "edit",
+            recentToolAt: now.addingTimeInterval(-60)
+        )
+        let grok = session(
+            id: "grok-bare",
+            source: .grokBuild,
+            state: .running,
+            updatedAt: now
+        )
+        let primary = SessionPrimarySelection.primaryLive(
+            from: [openCode, grok],
+            now: now
+        )
+        // 60s < meaningfulMaxAge — recent tools still rank above bare running.
+        #expect(primary?.source == .opencode)
+    }
+
     @Test func activeToolBeatsEverythingExceptAttention() {
         let openCode = session(
             id: "oc",

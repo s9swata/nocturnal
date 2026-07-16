@@ -188,5 +188,84 @@ struct GrokBridgeTests {
         #expect(session.id.rawValue.contains("019f6a16") || !session.id.rawValue.isEmpty)
         #expect(session.workingDirectory?.contains("nocturnal") == true
             || session.workingDirectory != nil)
+        // snake_case pre_tool_use must create real tool stats (not leave OpenCode owning the pill).
+        #expect(session.stats.lastToolName == "run_terminal_command"
+            || session.stats.toolUseCount > 0
+            || session.recentActivities.contains { $0.kind == .tool })
+    }
+
+    @Test func activityMappingNormalizesGrokSnakeCaseTools() {
+        var session = Session(
+            id: SessionID("g-tool"),
+            source: .grokBuild,
+            state: .running,
+            title: "Work",
+            createdAt: Date(),
+            updatedAt: Date()
+        )
+        let envelope = EventEnvelope(
+            source: .grokBuild,
+            eventType: "pre_tool_use",
+            sessionId: "g-tool",
+            payload: [
+                "toolName": .string("search_replace"),
+                "toolInput": .object([
+                    "file_path": .string("/tmp/nocturnal/PillView.swift"),
+                ]),
+            ]
+        )
+        let decoded = GrokEventDecoder().decode(envelope)
+        SessionActivityMapping.apply(
+            to: &session,
+            envelope: envelope,
+            decoded: decoded,
+            allowLifecycleMutation: true
+        )
+        #expect(session.stats.lastToolName == "search_replace")
+        #expect(session.currentActivity?.kind == .tool)
+        #expect(session.currentActivity?.primaryPath?.contains("PillView") == true)
+        #expect(session.source == .grokBuild)
+    }
+
+    @Test func primaryPrefersGrokOverStaleOpenCodeEdit() {
+        let now = Date()
+        var openCode = Session(
+            id: SessionID("opencode:/Users/demo/nocturnal"),
+            source: .opencode,
+            state: .idle,
+            title: "OpenCode session",
+            workingDirectory: "/Users/demo/nocturnal",
+            createdAt: now.addingTimeInterval(-3600),
+            updatedAt: now.addingTimeInterval(-1800)
+        )
+        openCode.recentActivities = [
+            SessionActivity(
+                kind: .tool,
+                label: "edit",
+                detail: "/tmp/nocturnal-opencode-full-test.txt",
+                eventType: "PostToolUse",
+                startedAt: now.addingTimeInterval(-1800),
+                endedAt: now.addingTimeInterval(-1800),
+                toolName: "edit",
+                primaryPath: "/tmp/nocturnal-opencode-full-test.txt"
+            ),
+        ]
+        var grok = Session(
+            id: SessionID("019f6b87-a207-7292-89eb-52d72bca033e"),
+            source: .grokBuild,
+            state: .running,
+            title: "Grok",
+            workingDirectory: "/Users/demo/nocturnal",
+            createdAt: now.addingTimeInterval(-30),
+            updatedAt: now
+        )
+        grok.currentActivity = SessionActivity(
+            kind: .turn,
+            label: "Thinking",
+            eventType: "UserPromptSubmit",
+            startedAt: now
+        )
+        let primary = SessionPrimarySelection.primaryLive(from: [openCode, grok], now: now)
+        #expect(primary?.source == .grokBuild)
     }
 }
