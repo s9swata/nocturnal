@@ -44,7 +44,12 @@ enum BrandAssets {
         return image
     }
 
-    /// Monochrome agent product mark for supported coding agents.
+    /// Agent product mark for the dark notch / list chrome.
+    ///
+    /// Bundled marks are **black-on-transparent** silhouettes (not full-color
+    /// logos). We enable template mode so SwiftUI tints them with the surface
+    /// color (white/grey). Drawing them as `.original` would leave pure black
+    /// pixels on a black island — invisible.
     static func agentMarkNSImage(for source: AgentSource, size: CGFloat? = nil) -> NSImage? {
         guard let name = agentMarkResourceName(for: source) else { return nil }
         guard let image = mutableCopyOfSource(named: name) else { return nil }
@@ -194,8 +199,10 @@ struct BrandAppIcon: View {
     }
 }
 
-/// Product mark for a coding agent (Codex / Claude / OpenCode).
-/// Template-tinted monochrome brand SVG→PNG; falls back to an SF Symbol.
+/// Product mark for a coding agent (Codex / Claude / OpenCode / …).
+///
+/// PNGs are black-on-transparent templates → tinted with `color` for the dark UI.
+/// Falls back to an SF Symbol if the PNG is missing.
 struct AgentBrandMark: View {
     let source: AgentSource
     var size: CGFloat = 13
