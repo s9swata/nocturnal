@@ -21,12 +21,13 @@ struct HookForwarderMain {
                 nocturnal-hook-forwarder — fail-open stdin → Nocturnal socket
 
                 Usage:
-                  nocturnal-hook-forwarder [--socket PATH] [--wrap-source codex|claude]
+                  nocturnal-hook-forwarder [--socket PATH] [--wrap-source SOURCE]
                   echo '{"v":1,...}' | nocturnal-hook-forwarder
 
                 Options:
                   --socket PATH              Unix domain socket path
-                  --wrap-source SOURCE       Default source when normalizing raw hooks (codex|claude)
+                  --wrap-source SOURCE       Default source when normalizing raw hooks
+                                             (codex|claude|opencode|grok-build|…)
                   --session-id ID            Default session id when normalizing
                   --timeout SECONDS          Connect timeout (default 0.5)
                   --decision-timeout SECONDS Wait for UI on PermissionRequest (default 120)

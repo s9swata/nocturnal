@@ -245,11 +245,12 @@ final class AppModel {
         syncOverlayVisibility()
     }
 
-    /// Recover session identity from local Codex rollouts + OpenCode storage.
+    /// Recover session identity from local Codex / OpenCode / Grok storage.
     /// Lifecycle hooks / plugin remain authoritative for live state.
     private func reconcileLocalAgentSessions() async {
         await reconcileLocalCodexSessions()
         await reconcileLocalOpenCodeSessions()
+        await reconcileLocalGrokSessions()
     }
 
     private func reconcileLocalCodexSessions() async {
@@ -291,6 +292,23 @@ final class AppModel {
             }
         } catch {
             // Reconciliation is optional and fail-open. Socket hooks still start.
+        }
+    }
+
+    private func reconcileLocalGrokSessions() async {
+        let scanner = GrokSessionScanner.resolve()
+        do {
+            let snapshots = try await withThrowingTaskGroup(
+                of: [GrokSessionSnapshot].self
+            ) { group in
+                group.addTask { try scanner.scan() }
+                return try await group.next() ?? []
+            }
+            for snapshot in snapshots {
+                _ = await store.apply(snapshot.envelope())
+            }
+        } catch {
+            // Optional catch-up; fail-open.
         }
     }
 

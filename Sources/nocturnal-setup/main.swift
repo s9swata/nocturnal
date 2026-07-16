@@ -76,11 +76,11 @@ struct SetupMain {
             nocturnal-setup — install/uninstall Nocturnal agent hooks
 
             Usage:
-              nocturnal-setup install [--product codex|claude|opencode|all] [options]
-              nocturnal-setup uninstall [--product codex|claude|opencode|all] [options]
-              nocturnal-setup status [--product codex|claude|opencode|all] [options]
-              nocturnal-setup doctor [--product codex|claude|opencode|all] [options]
-              nocturnal-setup repair [--product codex|claude|opencode|all] [options]
+              nocturnal-setup install [--product codex|claude|opencode|grok|all] [options]
+              nocturnal-setup uninstall [--product codex|claude|opencode|grok|all] [options]
+              nocturnal-setup status [--product codex|claude|opencode|grok|all] [options]
+              nocturnal-setup doctor [--product codex|claude|opencode|grok|all] [options]
+              nocturnal-setup repair [--product codex|claude|opencode|grok|all] [options]
 
             Options:
               --forwarder PATH   Path to nocturnal-hook-forwarder binary

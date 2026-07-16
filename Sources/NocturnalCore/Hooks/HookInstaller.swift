@@ -5,6 +5,8 @@ public enum HookProduct: String, Sendable, CaseIterable {
     case codex
     case claude
     case opencode
+    /// Grok Build (`~/.grok/hooks/*.json`).
+    case grok
 }
 
 public enum HookInstallAction: String, Sendable {
@@ -54,7 +56,7 @@ public struct HookInstallResult: Sendable, Equatable {
     }
 }
 
-/// Safe, idempotent hook installer for Codex, Claude, and OpenCode.
+/// Safe, idempotent hook installer for Codex, Claude, OpenCode, and Grok Build.
 ///
 /// **Never** uses real user homes in unit tests. Pass ``configRoot`` pointing
 /// at a temporary directory, or set `NOCTURNAL_CONFIG_ROOT`.
@@ -66,6 +68,7 @@ public struct HookInstallResult: Sendable, Equatable {
 /// | Codex | `.codex/nocturnal-hooks.json` | `.codex/hooks.json` (event map with nested command handlers) |
 /// | Claude | `.claude/nocturnal-hooks.json` | `.claude/settings.json` (`hooks` key) |
 /// | OpenCode | `.config/opencode/nocturnal-hooks.json` | `.config/opencode/plugins/nocturnal-bridge.js` |
+/// | Grok | `.grok/nocturnal-hooks.json` | `.grok/hooks/nocturnal.json` (lifecycle command hooks) |
 ///
 /// Native formats evolve; changed files receive a timestamped backup under
 /// Application Support `backups/`. The sidecar is a Nocturnal-owned descriptor,
@@ -77,6 +80,22 @@ public struct HookInstaller: Sendable {
     public static let managedCommandMarker = "nocturnal-hook-forwarder"
     public static let openCodePluginFileName = "nocturnal-bridge.js"
     public static let openCodePluginMarker = "nocturnal-opencode-bridge"
+    public static let grokHookFileName = "nocturnal.json"
+    public static let grokWrapSourceFlag = "--wrap-source grok-build"
+
+    /// Grok Build lifecycle events installed into `~/.grok/hooks/nocturnal.json`.
+    public static let grokLifecycleEvents = [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "Stop",
+        "SessionEnd",
+        "Notification",
+        "SubagentStart",
+        "SubagentStop",
+    ]
 
     public var configRoot: URL
     /// Explicit Codex home (`CODEX_HOME`). Nil means `<configRoot>/.codex`.
@@ -168,6 +187,9 @@ public struct HookInstaller: Sendable {
         case .opencode:
             return openCodeConfigDirectory()
                 .appendingPathComponent("nocturnal-hooks.json")
+        case .grok:
+            return grokHomeDirectory()
+                .appendingPathComponent("nocturnal-hooks.json")
         }
     }
 
@@ -184,7 +206,20 @@ public struct HookInstaller: Sendable {
         case .opencode:
             return openCodePluginsDirectory()
                 .appendingPathComponent(Self.openCodePluginFileName)
+        case .grok:
+            return grokHooksDirectory()
+                .appendingPathComponent(Self.grokHookFileName)
         }
+    }
+
+    /// Grok Build home: `<configRoot>/.grok` (or `GROK_HOME` when resolving in production).
+    public func grokHomeDirectory() -> URL {
+        configRoot.appendingPathComponent(".grok", isDirectory: true)
+    }
+
+    /// Grok auto-loaded hook JSON directory.
+    public func grokHooksDirectory() -> URL {
+        grokHomeDirectory().appendingPathComponent("hooks", isDirectory: true)
     }
 
     /// OpenCode global config root: `<configRoot>/.config/opencode`.
@@ -261,7 +296,7 @@ public struct HookInstaller: Sendable {
                         configPath: url.path,
                         dryRun: dryRun
                     )
-                    if mode == .mergeNative || product == .opencode {
+                    if mode == .mergeNative || product == .opencode || product == .grok {
                         let merge = try mergeNative(product: product)
                         result.backupPath = merge.backupPath
                         result.nativeConfigPath = merge.nativeConfigPath
@@ -288,8 +323,9 @@ public struct HookInstaller: Sendable {
         var mergeBackup: String?
 
         // OpenCode has no shell hooks — the JS plugin *is* the native integration.
-        // Always install it (even in sidecar mode) so observe-only live activity works.
-        if mode == .mergeNative || product == .opencode {
+        // Grok's native surface is `~/.grok/hooks/*.json` — always write it.
+        // Always install (even in sidecar mode) so observe-only live activity works.
+        if mode == .mergeNative || product == .opencode || product == .grok {
             let merge = try mergeNative(product: product)
             message += "; \(merge.message)"
             nativePath = merge.nativeConfigPath
@@ -328,7 +364,7 @@ public struct HookInstaller: Sendable {
             messages.append("Nothing to uninstall (sidecar)")
         }
 
-        if mode == .mergeNative || product == .opencode {
+        if mode == .mergeNative || product == .opencode || product == .grok {
             let unmerge = try unmergeNative(product: product)
             messages.append(unmerge.message)
             if backupPath == nil { backupPath = unmerge.backupPath }
@@ -362,6 +398,8 @@ public struct HookInstaller: Sendable {
             return try mergeClaudeNative()
         case .opencode:
             return try mergeOpenCodeNative()
+        case .grok:
+            return try mergeGrokNative()
         }
     }
 
@@ -373,6 +411,8 @@ public struct HookInstaller: Sendable {
             return try unmergeClaudeNative()
         case .opencode:
             return try unmergeOpenCodeNative()
+        case .grok:
+            return try unmergeGrokNative()
         }
     }
 
@@ -704,6 +744,131 @@ public struct HookInstaller: Sendable {
         )
     }
 
+    /// Grok Build `~/.grok/hooks/nocturnal.json` — dedicated file, fail-open command hooks.
+    ///
+    /// Grok merges all `hooks/*.json` files; we own only this file so foreign hooks
+    /// in other files are never rewritten.
+    private func mergeGrokNative() throws -> MergeOutcome {
+        let url = nativeConfigURL(for: .grok)
+        let command = grokForwarderCommand()
+        let fm = FileManager.default
+
+        if !dryRun {
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        }
+
+        var backupPath: String?
+        if fm.fileExists(atPath: url.path) {
+            let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            let desired = grokNativeHooksJSON(command: command)
+            if existing == desired
+                || (existing.contains(Self.managedCommandMarker)
+                    && existing.contains(Self.grokWrapSourceFlag)
+                    && existing.contains(Self.escapeJSONStringContents(socketPath.path)))
+            {
+                // Refresh if socket/forwarder path drifted.
+                if existing == desired {
+                    return MergeOutcome(
+                        message: dryRun
+                            ? "Would skip Grok hooks (already installed)"
+                            : "Grok hooks already installed (idempotent)",
+                        nativeConfigPath: url.path
+                    )
+                }
+            }
+            if !dryRun {
+                backupPath = try backupExisting(url: url, product: .grok, label: "native").path
+            } else {
+                backupPath = "(dry-run backup)"
+            }
+        }
+
+        let body = grokNativeHooksJSON(command: command)
+        if !dryRun {
+            try body.write(to: url, atomically: true, encoding: .utf8)
+        }
+
+        return MergeOutcome(
+            message: dryRun
+                ? "Would install Grok Build hooks (\(Self.grokHookFileName))"
+                : "Installed Grok Build hooks (\(Self.grokHookFileName))",
+            backupPath: backupPath,
+            nativeConfigPath: url.path
+        )
+    }
+
+    private func unmergeGrokNative() throws -> MergeOutcome {
+        let url = nativeConfigURL(for: .grok)
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else {
+            return MergeOutcome(
+                message: "No Grok hooks file to remove",
+                nativeConfigPath: url.path
+            )
+        }
+
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        guard existing.contains(Self.managedCommandMarker) || existing.contains(Self.managedKey) else {
+            return MergeOutcome(
+                message: "Grok hooks file present but not Nocturnal-managed; left untouched",
+                nativeConfigPath: url.path
+            )
+        }
+
+        var backupPath: String?
+        if !dryRun {
+            backupPath = try backupExisting(url: url, product: .grok, label: "native").path
+            try fm.removeItem(at: url)
+        } else {
+            backupPath = "(dry-run backup)"
+        }
+
+        return MergeOutcome(
+            message: dryRun ? "Would remove Grok Build hooks" : "Removed Grok Build hooks",
+            backupPath: backupPath,
+            nativeConfigPath: url.path
+        )
+    }
+
+    /// JSON body for `~/.grok/hooks/nocturnal.json`.
+    public func grokNativeHooksJSON(command: String? = nil) -> String {
+        let cmd = command ?? grokForwarderCommand()
+        let escaped = Self.escapeJSONStringContents(cmd)
+        var eventBlocks: [String] = []
+        for event in Self.grokLifecycleEvents {
+            eventBlocks.append(
+                """
+                    "\(event)": [
+                      {
+                        "\(Self.managedKey)": true,
+                        "hooks": [
+                          {
+                            "type": "command",
+                            "command": "\(escaped)",
+                            "timeout": 8,
+                            "\(Self.managedKey)": true
+                          }
+                        ]
+                      }
+                    ]
+                """
+            )
+        }
+        return """
+        {
+          "\(Self.managedKey)": true,
+          "description": "Nocturnal Grok Build bridge — fail-open live activity",
+          "hooks": {
+        \(eventBlocks.joined(separator: ",\n"))
+          }
+        }
+        """
+    }
+
+    public func grokForwarderCommand() -> String {
+        forwarderCommand() + " \(Self.grokWrapSourceFlag) --timeout 0.5"
+    }
+
     /// Fail-open JS plugin that maps OpenCode events → EventEnvelope NDJSON on the socket.
     ///
     /// Template: ``OpenCodeBridge.plugin.js`` (v3: ``permission.ask`` + ``serverUrl`` + correct SDK name).
@@ -842,6 +1007,30 @@ public struct HookInstaller: Sendable {
                 return (false, "OpenCode plugin socket path mismatch")
             }
             return (true, "OpenCode plugin bridge healthy")
+        }
+
+        if product == .grok {
+            guard let text = try? String(contentsOf: native, encoding: .utf8) else {
+                return (false, "Grok hooks file unreadable")
+            }
+            let managed = text.contains(Self.managedCommandMarker)
+                && text.contains(Self.grokWrapSourceFlag)
+            guard managed else {
+                return (false, "Grok hooks missing Nocturnal forwarder")
+            }
+            let path = socketPath.path
+            let socketOk = text.contains(path)
+                || text.contains(path.replacingOccurrences(of: "/", with: "\\/"))
+                || text.contains(Self.escapeJSONStringContents(path))
+            guard socketOk else {
+                return (false, "Grok hooks socket path mismatch")
+            }
+            for event in Self.grokLifecycleEvents {
+                guard text.contains("\"\(event)\"") else {
+                    return (false, "Grok hooks missing \(event)")
+                }
+            }
+            return (true, "Grok Build hooks healthy")
         }
 
         guard let data = try? Data(contentsOf: native),
@@ -991,6 +1180,8 @@ public struct HookInstaller: Sendable {
             events = ClaudeEventDecoder.implementedEventTypes.sorted()
         case .opencode:
             events = OpenCodeEventDecoder.implementedEventTypes.sorted()
+        case .grok:
+            events = GrokEventDecoder.implementedEventTypes.sorted()
         }
         let quoted = events.map { "\"\($0)\"" }.joined(separator: ", ")
         return "[\(quoted)]"

@@ -63,10 +63,17 @@ public enum AgentRegistry: Sendable {
         id: "grok-build",
         displayName: "Grok Build",
         source: .grokBuild,
-        capabilities: .envelopeBridge,
+        capabilities: AgentCapabilities(
+            liveActivity: true,
+            permissions: false,
+            questions: false,
+            recoveryScan: true,
+            jumpBack: true,
+            installableHooks: true
+        ),
         decisionTransport: .none,
         aliases: ["grok", "grokbuild", "grok_build", "xai-grok-build"],
-        integrationNotes: "Tier A: session/export bridge. Bidirectional decisions when a transport exists."
+        integrationNotes: "Tier B: ~/.grok/hooks/nocturnal.json → nocturnal-hook-forwarder. Live activity + recovery; Grok owns permissions."
     )
 
     public static let agy = AgentProfile(
@@ -186,6 +193,7 @@ public enum AgentRegistry: Sendable {
         case .codex: return .codex
         case .claude: return .claude
         case .opencode: return .opencode
+        case .grokBuild: return .grok
         default: return nil
         }
     }

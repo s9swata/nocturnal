@@ -53,6 +53,12 @@ public struct OpenCodeAgentAdapter: HookInstallingAdapter, HTTPPermissionAdapter
     }
 }
 
+public struct GrokAgentAdapter: HookInstallingAdapter {
+    public init() {}
+    public var profile: AgentProfile { AgentRegistry.grokBuild }
+    public var hookProduct: HookProduct? { .grok }
+}
+
 /// Envelope-bridge adapters: accept wire events only; no install / decisions yet.
 public struct EnvelopeBridgeAdapter: AgentAdapter {
     public let profile: AgentProfile
@@ -67,9 +73,9 @@ public enum AgentAdapterCatalog: Sendable {
         CodexAgentAdapter(),
         ClaudeAgentAdapter(),
         OpenCodeAgentAdapter(),
+        GrokAgentAdapter(),
         EnvelopeBridgeAdapter(profile: AgentRegistry.cursor),
         EnvelopeBridgeAdapter(profile: AgentRegistry.kimi),
-        EnvelopeBridgeAdapter(profile: AgentRegistry.grokBuild),
         EnvelopeBridgeAdapter(profile: AgentRegistry.agy),
         EnvelopeBridgeAdapter(profile: AgentRegistry.generic),
     ]
@@ -81,7 +87,7 @@ public enum AgentAdapterCatalog: Sendable {
         case .opencode: return OpenCodeAgentAdapter()
         case .cursor: return EnvelopeBridgeAdapter(profile: AgentRegistry.cursor)
         case .kimi: return EnvelopeBridgeAdapter(profile: AgentRegistry.kimi)
-        case .grokBuild: return EnvelopeBridgeAdapter(profile: AgentRegistry.grokBuild)
+        case .grokBuild: return GrokAgentAdapter()
         case .agy: return EnvelopeBridgeAdapter(profile: AgentRegistry.agy)
         case .unknown: return EnvelopeBridgeAdapter(profile: AgentRegistry.unknown)
         }

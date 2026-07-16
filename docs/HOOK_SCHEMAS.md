@@ -11,7 +11,7 @@ Wire format for every line: `EventEnvelope` (see `Sources/NocturnalCore/Models/E
 |-------|------|--------|
 | `v` | Int | Schema version; current `1` |
 | `id` | UUID string | Unique event id (invalid/missing → generated) |
-| `source` | `codex` \| `claude` \| `opencode` \| `unknown` | Unknown raw strings (including obsolete labels) decode as `unknown` + optional `sourceRaw` |
+| `source` | `codex` \| `claude` \| `opencode` \| `grok-build` \| `cursor` \| `kimi` \| `agy` \| `unknown` | Unknown raw strings decode as `unknown` + optional `sourceRaw` |
 | `eventType` | String | Upstream or normalized name |
 | `sessionId` | String | Groups events into one `Session` |
 | `timestamp` | ISO-8601 | Fractional seconds accepted |

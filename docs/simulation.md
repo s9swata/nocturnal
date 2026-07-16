@@ -52,6 +52,7 @@ cat Fixtures/codex/native-lifecycle-0.144.1.ndjson | "$BIN/nocturnal-hook-forwar
 cat Fixtures/claude/session-lifecycle.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source claude
 cat Fixtures/opencode/session-lifecycle.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source opencode
 cat Fixtures/opencode/native-bus-events.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source opencode
+cat Fixtures/grok/session-lifecycle.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source grok-build
 
 # Bad flags must not steal values (still exit 0 — fail-open):
 "$BIN/nocturnal-hook-forwarder" --socket --timeout 1 </dev/null
@@ -76,7 +77,22 @@ open build/Nocturnal.app
 # then pipe fixtures through build/Nocturnal.app/Contents/MacOS/nocturnal-hook-forwarder
 ```
 
-Fixtures shipped in the app: `Contents/Resources/Fixtures/{codex,claude,opencode}/`.
+Fixtures shipped in the app: `Contents/Resources/Fixtures/{codex,claude,opencode,grok}/`.
+
+### Grok Build live (hooks)
+
+```bash
+# With Nocturnal running and socket bound:
+nocturnal-setup install --product grok
+# Restart Grok so it loads ~/.grok/hooks/nocturnal.json
+# Then use a session; SessionStart / tools / Stop appear in the pill.
+```
+
+Simulate without a live Grok process:
+
+```bash
+cat Fixtures/grok/session-lifecycle.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source grok-build
+```
 
 ### OpenCode live (plugin)
 

@@ -38,12 +38,23 @@ profile.capabilities.permissions
 | `codex` | `.codex` | C | stdout JSON (hook forwarder) |
 | `claude` | `.claude` | C | stdout JSON |
 | `opencode` | `.opencode` | C | HTTP permission API |
+| `grok-build` | `.grokBuild` | **B** (live + install + recovery) | none (Grok owns permissions) |
 | `cursor` | `.cursor` | A | none |
 | `kimi` | `.kimi` | A | none |
-| `grok-build` | `.grokBuild` | A | none |
 | `agy` | `.agy` | A | none |
 | `generic` | `.unknown` | A | response file (optional) |
 | `unknown` | `.unknown` | A | none |
+
+### Grok Build (live)
+
+```bash
+nocturnal-setup install --product grok
+# Restart any open `grok` session so hooks reload.
+# Live SessionStart / PreToolUse / PostToolUse / Stop appear in the island.
+```
+
+Native file: `~/.grok/hooks/nocturnal.json` → `nocturnal-hook-forwarder --wrap-source grok-build`.  
+Recovery: `active_sessions.json` + recent `sessions/**/summary.json` (idle stubs only).
 
 Capabilities live in `AgentCapabilities`. Lookup:
 

@@ -25,17 +25,20 @@ public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
     private let codex: CodexEventDecoder
     private let claude: ClaudeEventDecoder
     private let opencode: OpenCodeEventDecoder
+    private let grok: GrokEventDecoder
     private let lock = NSLock()
     private var metrics = EventDecodeMetrics()
 
     public init(
         codex: CodexEventDecoder = CodexEventDecoder(),
         claude: ClaudeEventDecoder = ClaudeEventDecoder(),
-        opencode: OpenCodeEventDecoder = OpenCodeEventDecoder()
+        opencode: OpenCodeEventDecoder = OpenCodeEventDecoder(),
+        grok: GrokEventDecoder = GrokEventDecoder()
     ) {
         self.codex = codex
         self.claude = claude
         self.opencode = opencode
+        self.grok = grok
     }
 
     public func decode(_ envelope: EventEnvelope) -> DecodedEvent {
@@ -47,19 +50,26 @@ public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
             result = claude.decode(envelope)
         case .opencode:
             result = opencode.decode(envelope)
-        case .cursor, .kimi, .grokBuild, .agy:
+        case .grokBuild:
+            result = grok.decode(envelope)
+        case .cursor, .kimi, .agy:
             // Tier A: no product decoder yet — generic lifecycle passthrough
-            // plus best-effort Codex/Claude/OpenCode structural decode.
-            let codexResult = codex.decode(envelope)
-            if !codexResult.isUnknown {
-                result = codexResult
+            // plus best-effort structural decode (prefer Grok when names match).
+            let grokResult = grok.decode(envelope)
+            if !grokResult.isUnknown {
+                result = grokResult
             } else {
-                let claudeResult = claude.decode(envelope)
-                if !claudeResult.isUnknown {
-                    result = claudeResult
+                let codexResult = codex.decode(envelope)
+                if !codexResult.isUnknown {
+                    result = codexResult
                 } else {
-                    let openResult = opencode.decode(envelope)
-                    result = openResult.isUnknown ? Self.unknownPassthrough(envelope) : openResult
+                    let claudeResult = claude.decode(envelope)
+                    if !claudeResult.isUnknown {
+                        result = claudeResult
+                    } else {
+                        let openResult = opencode.decode(envelope)
+                        result = openResult.isUnknown ? Self.unknownPassthrough(envelope) : openResult
+                    }
                 }
             }
         case .unknown:
@@ -98,7 +108,10 @@ public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
                     if !openResult.isUnknown {
                         result = openResult
                     } else {
-                        result = Self.unknownPassthrough(envelope)
+                        let grokResult = grok.decode(envelope)
+                        result = grokResult.isUnknown
+                            ? Self.unknownPassthrough(envelope)
+                            : grokResult
                     }
                 }
             }
@@ -325,11 +338,21 @@ public struct EnvelopeNormalizer: Sendable {
 
         let inferredSource: AgentSource = {
             if defaultSource != .unknown { return defaultSource }
+            // Grok runner injects GROK_* env; payload still looks Claude-like.
+            // Prefer explicit wrap-source; without it, keep historical Claude bias
+            // for bare hook_event_name (Claude installs never set wrap-source grok).
             if object["hook_event_name"] != nil || object["hookEventName"] != nil {
                 return .claude
             }
             if ClaudeEventDecoder.implementedEventTypes.contains(eventType) {
                 return .claude
+            }
+            if GrokEventDecoder.implementedEventTypes.contains(eventType)
+                || GrokEventDecoder.implementedEventTypes.contains(
+                    GrokEventDecoder.normalizeEventType(eventType)
+                )
+            {
+                return .grokBuild
             }
             if CodexEventDecoder.implementedEventTypes.contains(eventType) {
                 return .codex

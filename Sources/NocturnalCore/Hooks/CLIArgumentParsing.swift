@@ -63,9 +63,9 @@ public enum SetupCLIParseError: Error, Sendable, Equatable, CustomStringConverti
     public var description: String {
         switch self {
         case .missingProductValue:
-            return "missing value for --product (expected codex|claude|opencode|all)"
+            return "missing value for --product (expected codex|claude|opencode|grok|all)"
         case .unknownProduct(let raw):
-            return "unknown product: \(raw) (expected codex|claude|opencode|all)"
+            return "unknown product: \(raw) (expected codex|claude|opencode|grok|all)"
         case .missingForwarderValue:
             return "missing value for --forwarder (expected path to nocturnal-hook-forwarder)"
         case .missingModeValue:
@@ -119,6 +119,8 @@ public struct SetupCLIOptions: Sendable, Equatable {
                 options.products = [.claude]
             case "opencode", "open-code", "open_code":
                 options.products = [.opencode]
+            case "grok", "grok-build", "grokbuild", "grok_build":
+                options.products = [.grok]
             default:
                 throw SetupCLIParseError.unknownProduct(raw)
             }
@@ -217,15 +219,12 @@ public struct HookForwarderCLIOptions: Sendable, Equatable {
         case .missingValue:
             options.warnings.append("missing value for --wrap-source; not wrapping")
         case .value(let raw):
-            switch raw.lowercased() {
-            case "codex":
-                options.wrapSource = .codex
-            case "claude":
-                options.wrapSource = .claude
-            case "opencode", "open-code", "open_code":
-                options.wrapSource = .opencode
-            default:
-                options.warnings.append("unknown wrap-source \(raw) (use codex|claude|opencode)")
+            let source = AgentSource(parsing: raw)
+            options.wrapSource = source
+            if source == .unknown {
+                options.warnings.append(
+                    "unrecognized wrap-source \(raw); wrapping as unknown (use codex|claude|opencode|grok-build|…)"
+                )
             }
         }
 
