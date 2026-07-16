@@ -48,35 +48,115 @@ struct SessionActivityTests {
     }
 
     @Test func humanizedTitlesForReadWriteShell() {
+        let now = Date()
         let read = SessionActivity(
             kind: .tool,
             label: "Read",
-            eventType: "PreToolUse",
+            eventType: "PostToolUse",
+            startedAt: now,
+            endedAt: now,
             toolName: "Read",
             primaryPath: "/tmp/Foo.swift",
             integration: .read
         )
-        #expect(read.humanizedTitle == "read Foo.swift")
+        #expect(read.humanizedLine.verb == "Read")
+        #expect(read.humanizedLine.detail == "Foo.swift")
+        #expect(read.humanizedTitle == "Read Foo.swift")
 
         let write = SessionActivity(
             kind: .tool,
             label: "Write",
-            eventType: "PreToolUse",
+            eventType: "PostToolUse",
+            startedAt: now,
+            endedAt: now,
             toolName: "Write",
             primaryPath: "Sources/App.swift",
             integration: .edit
         )
-        #expect(write.humanizedTitle == "write App.swift")
+        #expect(write.humanizedLine.verb == "Wrote")
+        #expect(write.humanizedTitle == "Wrote App.swift")
 
         let shell = SessionActivity(
             kind: .tool,
             label: "Bash",
-            eventType: "PreToolUse",
+            eventType: "PostToolUse",
+            startedAt: now,
+            endedAt: now,
             toolName: "Bash",
             command: "git status -sb",
             integration: .shell
         )
-        #expect(shell.humanizedTitle == "ran git status -sb")
+        #expect(shell.humanizedLine.verb == "Ran")
+        #expect(shell.humanizedLine.detail == "git status -sb")
+        #expect(shell.humanizedTitle == "Ran git status -sb")
+
+        let running = SessionActivity(
+            kind: .tool,
+            label: "Bash",
+            eventType: "PreToolUse",
+            toolName: "run_terminal_command",
+            command: "swift test",
+            integration: .shell
+        )
+        #expect(running.humanizedLine.verb == "Running")
+        #expect(running.humanizedLine.detail == "swift test")
+    }
+
+    @Test func humanizesWebSearchAndGrepAndMCP() {
+        let now = Date()
+        let search = SessionActivity(
+            kind: .tool,
+            label: "WebSearch",
+            detail: "cursor hooks web search",
+            eventType: "postToolUse",
+            startedAt: now,
+            endedAt: now,
+            toolName: "WebSearch",
+            integration: .web
+        )
+        #expect(search.humanizedLine.verb == "Searched")
+        #expect(search.humanizedLine.detail?.contains("cursor") == true)
+
+        let grep = SessionActivity(
+            kind: .tool,
+            label: "grep",
+            detail: "HumanizedActivityLine",
+            eventType: "PostToolUse",
+            startedAt: now,
+            endedAt: now,
+            toolName: "grep"
+        )
+        #expect(grep.humanizedLine.verb == "Grepped")
+
+        let mcp = SessionActivity(
+            kind: .tool,
+            label: "linear__save_issue",
+            eventType: "PostToolUse",
+            startedAt: now,
+            endedAt: now,
+            toolName: "linear__save_issue",
+            integration: .mcp
+        )
+        #expect(mcp.humanizedLine.verb == "Called")
+        #expect(mcp.humanizedLine.detail != nil)
+    }
+
+    @Test func humanizedLineTruncatesDetailNotVerb() {
+        let now = Date()
+        let long = SessionActivity(
+            kind: .tool,
+            label: "Bash",
+            eventType: "PostToolUse",
+            startedAt: now,
+            endedAt: now,
+            toolName: "Bash",
+            command: String(repeating: "a", count: 80),
+            integration: .shell
+        )
+        let clipped = long.humanizedLine.truncated(limit: 20)
+        #expect(clipped.verb == "Ran")
+        #expect(clipped.fullLine.count <= 20)
+        #expect(clipped.detail?.hasSuffix("…") == true)
     }
 
     @Test func approvalBecomesCurrentActivity() async {

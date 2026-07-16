@@ -215,13 +215,15 @@ struct PillView: View {
     @ViewBuilder
     private var centerColumn: some View {
         VStack(alignment: .leading, spacing: content.mode == .liveExpanded || content.mode == .attention ? 2 : 0) {
-            Text(content.primary)
-                .font(.caption.weight(isAttention ? .semibold : .medium))
-                .foregroundStyle(primaryColor)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .minimumScaleFactor(0.8)
-                .allowsTightening(true)
+            ActivityLineLabel(
+                line: content.primaryLine ?? HumanizedActivityLine(verb: content.primary),
+                font: .caption.weight(isAttention ? .semibold : .medium),
+                verbColor: primaryColor,
+                detailColor: NocturnalPalette.fgSecondary
+            )
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .allowsTightening(true)
 
             if let secondary = content.secondary,
                !secondary.isEmpty,

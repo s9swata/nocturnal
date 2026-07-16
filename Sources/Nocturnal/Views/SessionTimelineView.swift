@@ -110,15 +110,16 @@ struct SessionTimelineView: View {
                             mode: activity.isActive ? .running : .idle
                         )
 
-                        Text(activity.displayLine)
-                            .font(.caption)
-                            .foregroundStyle(
-                                activity.isActive
-                                    ? NocturnalPalette.fgPrimary
-                                    : NocturnalPalette.fgSecondary
-                            )
-                            .lineLimit(2)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        ActivityLineLabel(
+                            line: activity.humanizedLine,
+                            font: .caption,
+                            verbColor: activity.isActive
+                                ? NocturnalPalette.fgPrimary
+                                : NocturnalPalette.fgPrimary.opacity(0.92),
+                            detailColor: NocturnalPalette.fgSecondary
+                        )
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
                         if let duration = activity.durationDescription {
                             Text(duration)

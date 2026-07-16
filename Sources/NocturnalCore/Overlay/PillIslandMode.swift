@@ -23,6 +23,9 @@ public struct PillIslandContent: Sendable, Equatable {
     public var source: AgentSource?
     public var primary: String
     public var secondary: String?
+    /// When set, UI renders ``HumanizedActivityLine/verb`` in primary color and
+    /// ``HumanizedActivityLine/detail`` in secondary grey.
+    public var primaryLine: HumanizedActivityLine?
     public var trailingSources: [AgentSource]
     public var liveCount: Int
     public var attentionCount: Int
@@ -33,6 +36,7 @@ public struct PillIslandContent: Sendable, Equatable {
         source: AgentSource? = nil,
         primary: String,
         secondary: String? = nil,
+        primaryLine: HumanizedActivityLine? = nil,
         trailingSources: [AgentSource] = [],
         liveCount: Int = 0,
         attentionCount: Int = 0,
@@ -42,6 +46,7 @@ public struct PillIslandContent: Sendable, Equatable {
         self.source = source
         self.primary = primary
         self.secondary = secondary
+        self.primaryLine = primaryLine
         self.trailingSources = trailingSources
         self.liveCount = liveCount
         self.attentionCount = attentionCount
@@ -107,33 +112,49 @@ public enum PillIslandPresentation: Sendable {
         if session.state.needsAttention {
             let primary: String
             let secondary: String?
+            let primaryLine: HumanizedActivityLine?
             if let approval = session.pendingApproval {
                 let tool = approval.toolName
                 let detail = (approval.detail ?? approval.summary)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !detail.isEmpty, detail.caseInsensitiveCompare(tool) != .orderedSame {
-                    primary = "Approve \(tool)"
+                    primary = "Approve \(HumanizedActivityLine.prettyToken(tool))"
                     secondary = truncate(detail, 42)
+                    primaryLine = HumanizedActivityLine(
+                        verb: "Approve",
+                        detail: HumanizedActivityLine.compactCommand(detail, limit: 36)
+                    )
                 } else {
-                    primary = "Approve \(tool)"
+                    primary = "Approve \(HumanizedActivityLine.prettyToken(tool))"
                     secondary = agent
+                    primaryLine = HumanizedActivityLine(
+                        verb: "Approve",
+                        detail: HumanizedActivityLine.prettyToken(tool)
+                    )
                 }
             } else if let question = session.pendingQuestion {
                 primary = "Question"
                 secondary = truncate(question.prompt, 42)
+                primaryLine = HumanizedActivityLine(
+                    verb: "Question",
+                    detail: truncate(question.prompt, 42)
+                )
             } else if session.state == .failed {
                 let live = session.liveStatusLine
                 primary = live.isEmpty ? "Failed" : truncate(live, 40)
                 secondary = agent
+                primaryLine = HumanizedActivityLine(verb: primary)
             } else {
                 primary = "Needs you"
                 secondary = agent
+                primaryLine = HumanizedActivityLine(verb: "Needs you")
             }
             return PillIslandContent(
                 mode: .attention,
                 source: session.source,
                 primary: primary,
                 secondary: secondary,
+                primaryLine: primaryLine,
                 trailingSources: trailing,
                 liveCount: max(liveCount, 1),
                 attentionCount: attentionCount,
@@ -142,16 +163,16 @@ public enum PillIslandPresentation: Sendable {
         }
 
         // Live tool / waiting / idle-with-history.
-        let toolLine = toolDetail(for: session)
-        if let toolLine {
+        if let line = toolLine(for: session) {
             let useExpanded = pathShort != nil || liveCount > 1
             return PillIslandContent(
                 mode: useExpanded ? .liveExpanded : .liveCompact,
                 source: session.source,
-                primary: toolLine,
+                primary: line.fullLine,
                 secondary: useExpanded
                     ? [agent, pathShort].compactMap { $0 }.joined(separator: " · ")
                     : agent,
+                primaryLine: line,
                 trailingSources: trailing,
                 liveCount: max(liveCount, 1),
                 attentionCount: attentionCount,
@@ -161,19 +182,23 @@ public enum PillIslandPresentation: Sendable {
 
         if session.state == .running {
             let primary: String
+            let primaryLine: HumanizedActivityLine
             if let activity = session.currentActivity,
                activity.isActive,
                activity.kind == .turn
             {
-                primary = "thinking…"
+                primary = "Thinking…"
+                primaryLine = HumanizedActivityLine(verb: "Thinking…")
             } else {
-                primary = "waiting…"
+                primary = "Waiting…"
+                primaryLine = HumanizedActivityLine(verb: "Waiting…")
             }
             return PillIslandContent(
                 mode: .liveExpanded,
                 source: session.source,
                 primary: primary,
                 secondary: [agent, pathShort].compactMap { $0 }.joined(separator: " · "),
+                primaryLine: primaryLine,
                 trailingSources: trailing,
                 liveCount: max(liveCount, 1),
                 attentionCount: attentionCount,
@@ -187,6 +212,7 @@ public enum PillIslandPresentation: Sendable {
             source: session.source,
             primary: "Idle",
             secondary: agent,
+            primaryLine: HumanizedActivityLine(verb: "Idle"),
             trailingSources: trailing,
             liveCount: liveCount,
             attentionCount: attentionCount,
@@ -194,22 +220,22 @@ public enum PillIslandPresentation: Sendable {
         )
     }
 
-    private static func toolDetail(for session: Session) -> String? {
+    private static func toolLine(for session: Session) -> HumanizedActivityLine? {
         if let activity = session.currentActivity,
            activity.isActive,
            activity.kind == .tool || activity.kind == .approval
         {
-            let title = activity.humanizedTitle
-            if !Session.isNoiseStatusText(title) {
-                return truncate(title, 46)
+            let line = activity.humanizedLine.truncated(limit: 46)
+            if !Session.isNoiseStatusText(line.fullLine) {
+                return line
             }
         }
         if let recent = session.recentActivities.first(where: {
             $0.kind == .tool || $0.kind == .approval
         }) {
-            let title = recent.humanizedTitle
-            if !Session.isNoiseStatusText(title) {
-                return truncate(title, 46)
+            let line = recent.humanizedLine.truncated(limit: 46)
+            if !Session.isNoiseStatusText(line.fullLine) {
+                return line
             }
         }
         if let tool = session.stats.lastToolName, !tool.isEmpty {
@@ -218,6 +244,8 @@ public enum PillIslandPresentation: Sendable {
                 label: tool,
                 detail: session.stats.lastCommand,
                 eventType: "stats",
+                startedAt: session.updatedAt,
+                endedAt: session.updatedAt, // finished tool — past-tense "Ran" not "Running"
                 toolName: tool,
                 command: session.stats.lastCommand,
                 integration: ToolPayloadExtraction.classify(
@@ -227,7 +255,10 @@ public enum PillIslandPresentation: Sendable {
                     detail: nil
                 )
             )
-            return truncate(synthetic.humanizedTitle, 46)
+            let line = synthetic.humanizedLine.truncated(limit: 46)
+            if !Session.isNoiseStatusText(line.fullLine) {
+                return line
+            }
         }
         return nil
     }
