@@ -48,7 +48,12 @@ swift run Nocturnal
 BIN=.build/debug   # or .build/*-apple-macosx/debug
 cat Fixtures/codex/session-started.ndjson | "$BIN/nocturnal-hook-forwarder"
 cat Fixtures/codex/approval-required.ndjson | "$BIN/nocturnal-hook-forwarder"
+cat Fixtures/codex/native-lifecycle-0.144.1.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source codex
 cat Fixtures/claude/session-lifecycle.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source claude
+cat Fixtures/opencode/session-lifecycle.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source opencode
+cat Fixtures/opencode/native-bus-events.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source opencode
+cat Fixtures/grok/session-lifecycle.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source grok-build
+cat Fixtures/cursor/session-lifecycle.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source cursor
 
 # Bad flags must not steal values (still exit 0 — fail-open):
 "$BIN/nocturnal-hook-forwarder" --socket --timeout 1 </dev/null
@@ -57,6 +62,7 @@ cat Fixtures/claude/session-lifecycle.ndjson | "$BIN/nocturnal-hook-forwarder" -
 "$BIN/nocturnal-setup" install --product          # error
 "$BIN/nocturnal-setup" install --forwarder        # error
 "$BIN/nocturnal-setup" install --product codex --dry-run
+"$BIN/nocturnal-setup" doctor --product codex
 ```
 
 ## Question / answer path
@@ -72,7 +78,68 @@ open build/Nocturnal.app
 # then pipe fixtures through build/Nocturnal.app/Contents/MacOS/nocturnal-hook-forwarder
 ```
 
-Fixtures shipped in the app: `Contents/Resources/Fixtures/{codex,claude}/`.
+Fixtures shipped in the app: `Contents/Resources/Fixtures/{codex,claude,opencode,grok,cursor}/`.
+
+### Cursor live (hooks)
+
+```bash
+nocturnal-setup install --product cursor
+# Open a Cursor Agent chat; sessionStart / tools / stop should appear as Cursor.
+```
+
+Simulate without Cursor:
+
+```bash
+cat Fixtures/cursor/session-lifecycle.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source cursor
+```
+
+### Grok Build live (hooks)
+
+```bash
+# With Nocturnal running and socket bound:
+nocturnal-setup install --product grok
+# Restart Grok so it loads ~/.grok/hooks/nocturnal.json
+# Then use a session; SessionStart / tools / Stop appear in the pill.
+```
+
+Simulate without a live Grok process:
+
+```bash
+cat Fixtures/grok/session-lifecycle.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source grok-build
+```
+
+### OpenCode live (plugin)
+
+```bash
+# With Nocturnal running and socket bound:
+nocturnal-setup install --product opencode
+# Restart OpenCode so it loads ~/.config/opencode/plugins/nocturnal-bridge.js
+# Then run a session; tool/session events should appear in the pill.
+```
+
+### OpenCode approvals (Phase 2)
+
+In project or global `opencode.json`, require ask for tools you want to gate:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "bash": "ask",
+    "edit": "ask"
+  }
+}
+```
+
+When OpenCode prompts, Nocturnal should show **Approve**. Allow/Deny completes via
+the plugin (socket decision → OpenCode permission API). Optional backup: Nocturnal
+POSTs to `OPENCODE_SERVER` or `http://127.0.0.1:4096`.
+
+### OpenCode recovery (Phase 3)
+
+On launch, Nocturnal scans `~/.local/share/opencode/opencode.db` (and JSON
+fallback under `storage/session/`) and injects idle `session.reconciled` rows.
+Live plugin events still win for running state.
 
 ### Framework packaging notes (for maintainers)
 

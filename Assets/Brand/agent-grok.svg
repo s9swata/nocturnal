@@ -1,0 +1,6 @@
+<!-- Grok Build mark: raster template is agent-grok.png (from Design Assets/Typography/icon-1024x1024.png).
+     SVG kept only as a stub so brand docs stay discoverable; runtime loads the PNG. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img">
+  <title>Grok</title>
+  <!-- Prefer agent-grok.png for rendering -->
+</svg>

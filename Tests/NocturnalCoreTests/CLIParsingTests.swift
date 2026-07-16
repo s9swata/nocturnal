@@ -41,7 +41,7 @@ struct CLIParsingTests {
         let options = try SetupCLIOptions.parse(arguments: ["install"])
         #expect(options.products == HookProduct.allCases)
         #expect(options.forwarderPath == nil)
-        #expect(options.mode == .sidecar)
+        #expect(options.mode == .mergeNative)
         #expect(options.dryRun == false)
     }
 

@@ -1,0 +1,140 @@
+import Foundation
+import Testing
+@testable import NocturnalCore
+
+struct AgentIntegrationTests {
+    @Test func firstPartyProfilesSupportInlineDecisions() {
+        #expect(AgentRegistry.codex.supportsInlinePermissionDecision)
+        #expect(AgentRegistry.claude.supportsInlinePermissionDecision)
+        #expect(AgentRegistry.opencode.supportsInlinePermissionDecision)
+        #expect(AgentRegistry.codex.decisionTransport == .stdoutJSON)
+        #expect(AgentRegistry.opencode.decisionTransport == .http)
+    }
+
+    @Test func tierATargetsDoNotShowFakePermissionChips() {
+        for profile in [AgentRegistry.kimi, AgentRegistry.agy] {
+            #expect(profile.capabilities.liveActivity)
+            #expect(!profile.supportsInlinePermissionDecision)
+            #expect(profile.decisionTransport == .none)
+            #expect(!profile.isSetupInstallable)
+        }
+    }
+
+    @Test func grokBuildIsInstallableLiveOnly() {
+        let profile = AgentRegistry.grokBuild
+        #expect(profile.capabilities.liveActivity)
+        #expect(profile.capabilities.installableHooks)
+        #expect(profile.capabilities.recoveryScan)
+        #expect(!profile.supportsInlinePermissionDecision)
+        #expect(AgentRegistry.hookProduct(for: profile) == .grok)
+        #expect(AgentAdapterCatalog.adapter(for: .grokBuild) is GrokAgentAdapter)
+    }
+
+    @Test func cursorIsInstallableLiveOnly() {
+        let profile = AgentRegistry.cursor
+        #expect(profile.capabilities.liveActivity)
+        #expect(profile.capabilities.installableHooks)
+        #expect(!profile.supportsInlinePermissionDecision)
+        #expect(AgentRegistry.hookProduct(for: profile) == .cursor)
+        #expect(AgentAdapterCatalog.adapter(for: .cursor) is CursorAgentAdapter)
+    }
+
+    @Test func installableMatchesHookProducts() {
+        let installable = AgentRegistry.installable
+        // Every installable profile must map to a HookProduct (no silent drops).
+        for profile in installable {
+            #expect(
+                AgentRegistry.hookProduct(for: profile) != nil,
+                "installable profile \(profile.id) missing hookProduct"
+            )
+        }
+        let products = installable.compactMap { AgentRegistry.hookProduct(for: $0) }
+        #expect(Set(products) == Set(HookProduct.allCases))
+    }
+
+    @Test func parsingAliases() {
+        #expect(AgentRegistry.profile(parsing: "cursor-agent").id == "cursor")
+        #expect(AgentRegistry.profile(parsing: "kimi-code").source == .kimi)
+        #expect(AgentRegistry.profile(parsing: "grok").source == .grokBuild)
+        #expect(AgentRegistry.profile(parsing: "OpenCode").source == .opencode)
+        #expect(AgentSource(parsing: "agy").displayName == "Agy")
+    }
+
+    @Test func adHocSourceGetsEnvelopeBridgeCapabilities() {
+        let profile = AgentRegistry.profile(parsing: "my-custom-agent")
+        #expect(profile.id == "my-custom-agent")
+        #expect(profile.source == .unknown)
+        #expect(profile.capabilities == .envelopeBridge)
+        #expect(profile.decisionTransport == .none)
+        #expect(profile.capabilities.liveActivity)
+        #expect(!profile.supportsInlinePermissionDecision)
+    }
+
+    @Test func adapterCatalogRoutesSources() {
+        #expect(AgentAdapterCatalog.adapter(for: .codex) is CodexAgentAdapter)
+        #expect(AgentAdapterCatalog.adapter(for: .claude) is ClaudeAgentAdapter)
+        #expect(AgentAdapterCatalog.adapter(for: .opencode) is OpenCodeAgentAdapter)
+        #expect(AgentAdapterCatalog.adapter(for: .cursor).profile.id == "cursor")
+    }
+
+    @Test func openCodeHTTPAdapterDetectsSesSessions() {
+        let adapter = OpenCodeAgentAdapter()
+        let request = ApprovalRequest(
+            id: "p1",
+            sessionId: SessionID("ses_abc123"),
+            toolName: "bash",
+            summary: "ls",
+            detail: "ls",
+            raw: ["permission": .string("perm_1")]
+        )
+        #expect(adapter.shouldDeliverHTTPPermission(for: request))
+    }
+
+    @Test func openCodeHTTPAdapterRejectsCodexCorrelationOnly() {
+        let adapter = OpenCodeAgentAdapter()
+        let request = ApprovalRequest(
+            id: "apr-codex-1",
+            sessionId: SessionID("thread_codex_abc"),
+            toolName: "shell",
+            summary: "rm",
+            detail: "rm -rf /tmp/x",
+            raw: ["source": .string("codex")]
+        )
+        #expect(adapter.shouldDeliverHTTPPermission(for: request) == false)
+    }
+
+    @Test func adapterParsingPreservesCustomBridgeProfile() {
+        let adapter = AgentAdapterCatalog.adapter(parsing: "my-custom-agent")
+        #expect(adapter.profile.id == "my-custom-agent")
+        #expect(adapter.profile.capabilities.liveActivity)
+        #expect(adapter.profile.capabilities.permissions == false)
+    }
+
+    @Test func canonicalNormalizeMapsNativeNames() {
+        #expect(CanonicalAgentEvent.normalize("PermissionRequest") == "permission.asked")
+        #expect(CanonicalAgentEvent.normalize("PreToolUse") == "tool.started")
+        #expect(CanonicalAgentEvent.normalize("agent.turn.started") == "turn.started")
+        #expect(CanonicalAgentEvent.normalize("SessionEnd") == "session.completed")
+        #expect(CanonicalAgentEvent.normalize("custom.event") == "custom.event")
+    }
+
+    @Test func sessionProfileLookup() {
+        let now = Date()
+        let session = Session(
+            id: SessionID("c1"),
+            source: .cursor,
+            state: .running,
+            title: "Work",
+            createdAt: now,
+            updatedAt: now
+        )
+        #expect(AgentRegistry.profile(for: session).id == "cursor")
+        #expect(session.source.profile.capabilities.liveActivity)
+    }
+
+    @Test func sourceDisplayNamesComeFromRegistry() {
+        #expect(AgentSource.codex.displayName == "Codex")
+        #expect(AgentSource.kimi.displayName == "Kimi Code")
+        #expect(AgentSource.grokBuild.displayName == "Grok Build")
+    }
+}

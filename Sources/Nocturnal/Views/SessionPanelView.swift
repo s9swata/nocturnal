@@ -13,11 +13,14 @@ struct SessionPanelView: View {
     var style: SessionPanelStyle = .menuBar
 
     private var sessions: [Session] { model.visibleSessions }
+    private var hasAnySessions: Bool { !model.snapshot.sessions.isEmpty }
 
     var body: some View {
         Group {
-            if sessions.isEmpty {
+            if !hasAnySessions {
                 EmptySessionsView(model: model, style: style)
+            } else if sessions.isEmpty {
+                QuietSessionsHiddenView(model: model, style: style)
             } else {
                 sessionList
             }
@@ -34,31 +37,69 @@ struct SessionPanelView: View {
         }
     }
 
-    private var sessionList: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                ForEach(sessions) { session in
-                    SessionRowView(
-                        session: session,
-                        isSelected: model.selectedSessionID == session.id,
-                        style: style,
-                        model: model
-                    )
-                    .id(session.id)
+    private var attentionApproval: (Session, ApprovalRequest)? {
+        // Prefer selected, else first attention approval in visible list.
+        if let selected = model.selectedSession, let approval = selected.pendingApproval {
+            return (selected, approval)
+        }
+        for session in sessions {
+            if let approval = session.pendingApproval {
+                return (session, approval)
+            }
+        }
+        return nil
+    }
 
-                    if session.id != sessions.last?.id {
-                        Divider()
-                            .overlay(NocturnalPalette.borderSubtle.opacity(0.45))
-                            .padding(.leading, NocturnalLayout.contentPadding)
+    private var sessionList: some View {
+        VStack(spacing: 0) {
+            if style == .overlay, let pair = attentionApproval {
+                ApprovalRailView(session: pair.0, request: pair.1, model: model)
+                Divider().overlay(NocturnalPalette.borderSubtle.opacity(0.5))
+            }
+
+            if model.recoveryStubCount > 0, !model.showQuietSessions {
+                quietBanner
+            }
+
+            ScrollView {
+                LazyVStack(spacing: 4) {
+                    ForEach(sessions) { session in
+                        SessionRowView(
+                            session: session,
+                            isSelected: model.selectedSessionID == session.id,
+                            style: style,
+                            model: model
+                        )
+                        .id(session.id)
                     }
                 }
+                .padding(.vertical, 4)
             }
-            .padding(.vertical, 4)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Session list, \(sessions.count) sessions")
+            .accessibilityHint("Expand a row to see last signal and timeline. Up and Down change selection. A approves, D denies.")
         }
         .background(listBackground)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Session list, \(sessions.count) sessions")
-        .accessibilityHint("Up and Down arrows change selection. A approves, D denies the selected session.")
+    }
+
+    private var quietBanner: some View {
+        HStack(spacing: 8) {
+            Text("\(model.recoveryStubCount) recovered · hidden")
+                .font(.caption2)
+                .foregroundStyle(NocturnalPalette.fgSecondary)
+            Spacer(minLength: 4)
+            Button(model.showQuietSessions ? "Hide quiet" : "Show quiet") {
+                model.showQuietSessions.toggle()
+            }
+            .buttonStyle(.borderless)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(NocturnalPalette.fgSecondary)
+        }
+        .padding(.horizontal, NocturnalLayout.contentPadding)
+        .padding(.vertical, 6)
+        .background(NocturnalPalette.bgElevated.opacity(0.4))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(model.recoveryStubCount) recovered sessions hidden")
     }
 
     @ViewBuilder
@@ -87,6 +128,51 @@ struct SessionPanelView: View {
                 model.questionSheetSessionID = newValue?.id
             }
         )
+    }
+}
+
+// MARK: - Quiet-only (idle / recovery stubs hidden)
+
+struct QuietSessionsHiddenView: View {
+    @Bindable var model: AppModel
+    var style: SessionPanelStyle
+
+    private var hiddenLabel: String {
+        if model.recoveryStubCount > 0, model.quietSessionCount == model.recoveryStubCount {
+            let n = model.recoveryStubCount
+            return n == 1
+                ? "1 recovered session from disk is hidden"
+                : "\(n) recovered sessions from disk are hidden"
+        }
+        if model.quietSessionCount > 0 {
+            let n = model.quietSessionCount
+            return n == 1
+                ? "1 quiet session is hidden"
+                : "\(n) quiet sessions are hidden"
+        }
+        return "Quiet sessions are hidden"
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("No live sessions")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(NocturnalPalette.fgPrimary)
+            Text("\(hiddenLabel) so the list stays useful.")
+                .font(.caption)
+                .foregroundStyle(NocturnalPalette.fgSecondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: style == .menuBar ? 260 : 320)
+            Button("Show quiet sessions") {
+                model.showQuietSessions = true
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(NocturnalLayout.contentPadding)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("No live sessions. \(hiddenLabel) so the list stays useful.")
     }
 }
 

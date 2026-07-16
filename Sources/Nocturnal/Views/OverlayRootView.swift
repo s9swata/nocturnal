@@ -21,7 +21,6 @@ struct OverlayRootView: View {
                     .transition(reduceMotion ? .opacity : .opacity)
             }
         }
-        // Fill the hosting view; stay transparent outside capsule / rounded chrome.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color.clear)
         .animation(NocturnalMotion.expand(reduceMotion: reduceMotion), value: model.isOverlayExpanded)
@@ -34,6 +33,14 @@ private struct ExpandedOverlayPanel: View {
     @Bindable var model: AppModel
     var reduceMotion: Bool
     @FocusState private var listFocused: Bool
+    @Environment(\.openSettings) private var openSettings
+
+    private var totalCount: Int { model.snapshot.sessions.count }
+    private var liveCount: Int {
+        model.snapshot.sessions.filter {
+            $0.state.needsAttention || $0.state == .running || $0.currentActivity?.isActive == true
+        }.count
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -45,15 +52,35 @@ private struct ExpandedOverlayPanel: View {
             footer
         }
         .background(
-            RoundedRectangle(cornerRadius: NocturnalLayout.cornerRadiusPanel, style: .continuous)
-                .fill(NocturnalPalette.bgBase)
-                .overlay(
-                    RoundedRectangle(cornerRadius: NocturnalLayout.cornerRadiusPanel, style: .continuous)
-                        .strokeBorder(NocturnalPalette.borderSubtle.opacity(0.7), lineWidth: 1)
+            UnevenRoundedRectangle(
+                topLeadingRadius: 0,
+                bottomLeadingRadius: NocturnalLayout.cornerRadiusPanel,
+                bottomTrailingRadius: NocturnalLayout.cornerRadiusPanel,
+                topTrailingRadius: 0,
+                style: .continuous
+            )
+            .fill(NocturnalPalette.bgBase)
+            .overlay(
+                UnevenRoundedRectangle(
+                    topLeadingRadius: 0,
+                    bottomLeadingRadius: NocturnalLayout.cornerRadiusPanel,
+                    bottomTrailingRadius: NocturnalLayout.cornerRadiusPanel,
+                    topTrailingRadius: 0,
+                    style: .continuous
                 )
-                .shadow(color: .black.opacity(0.4), radius: 16, y: 6)
+                .strokeBorder(NocturnalPalette.borderSubtle.opacity(0.7), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.45), radius: 18, y: 8)
         )
-        .clipShape(RoundedRectangle(cornerRadius: NocturnalLayout.cornerRadiusPanel, style: .continuous))
+        .clipShape(
+            UnevenRoundedRectangle(
+                topLeadingRadius: 0,
+                bottomLeadingRadius: NocturnalLayout.cornerRadiusPanel,
+                bottomTrailingRadius: NocturnalLayout.cornerRadiusPanel,
+                topTrailingRadius: 0,
+                style: .continuous
+            )
+        )
         .focusable()
         .focused($listFocused)
         .onKeyPress(.escape) {
@@ -77,47 +104,114 @@ private struct ExpandedOverlayPanel: View {
             return .handled
         }
         .onAppear { listFocused = true }
+        .sheet(isPresented: $model.isFoldersSheetPresented) {
+            FoldersSheet(model: model)
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Nocturnal session panel")
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
-            BrandOwlMark(size: 15)
-                .foregroundStyle(NocturnalPalette.fgSecondary)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                BrandOwlMark(size: 15)
+                    .foregroundStyle(NocturnalPalette.fgSecondary)
 
-            Text("Sessions")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(NocturnalPalette.fgPrimary)
+                Text("Sessions")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(NocturnalPalette.fgPrimary)
 
-            Spacer(minLength: 4)
-
-            if model.attentionCount > 0 {
-                Text("\(model.attentionCount)")
+                Text(headerCountLabel)
                     .font(.caption2.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(NocturnalPalette.bgBase)
+                    .foregroundStyle(NocturnalPalette.fgSecondary)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(NocturnalPalette.accentAttention, in: Capsule())
-                    .accessibilityLabel("\(model.attentionCount) need attention")
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(NocturnalPalette.bgHighlight)
+                    )
+                    .accessibilityLabel(headerCountA11y)
+
+                Spacer(minLength: 4)
+
+                if model.attentionCount > 0 {
+                    Text("\(model.attentionCount)")
+                        .font(.caption2.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(NocturnalPalette.bgBase)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(NocturnalPalette.accentAttention, in: Capsule())
+                        .accessibilityLabel("\(model.attentionCount) need attention")
+                }
+
+                Button {
+                    model.isFoldersSheetPresented = true
+                } label: {
+                    Image(systemName: "folder")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(NocturnalPalette.fgSecondary)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Local folders")
+                .accessibilityLabel("Open folders")
+
+                Button {
+                    openSettings()
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(NocturnalPalette.fgSecondary)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Settings")
+                .accessibilityLabel("Open settings")
+
+                Button {
+                    model.collapseOverlay()
+                } label: {
+                    Image(systemName: "chevron.up")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(NocturnalPalette.fgSecondary)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Collapse panel")
+                .accessibilityLabel("Collapse session panel")
+                .keyboardShortcut(.escape, modifiers: [])
             }
 
-            Button {
-                model.collapseOverlay()
-            } label: {
-                Image(systemName: "chevron.up")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(NocturnalPalette.fgSecondary)
-                    .frame(width: 24, height: 24)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Collapse panel")
-            .accessibilityLabel("Collapse session panel")
-            .keyboardShortcut(.escape, modifiers: [])
+            Text(model.liveActivityLine)
+                .font(.caption)
+                .foregroundStyle(
+                    model.attentionCount > 0
+                        ? NocturnalPalette.accentAttention
+                        : NocturnalPalette.fgSecondary
+                )
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityLabel("Live: \(model.liveActivityLine)")
         }
         .padding(.horizontal, NocturnalLayout.contentPadding)
         .padding(.vertical, 10)
+    }
+
+    private var headerCountLabel: String {
+        if model.recoveryStubCount > 0, !model.showQuietSessions {
+            return "\(model.visibleSessions.count)"
+        }
+        return "\(totalCount)"
+    }
+
+    private var headerCountA11y: String {
+        if model.recoveryStubCount > 0, !model.showQuietSessions {
+            return "\(model.visibleSessions.count) live sessions, \(model.recoveryStubCount) recovered hidden"
+        }
+        return "\(totalCount) sessions total"
     }
 
     private var footer: some View {

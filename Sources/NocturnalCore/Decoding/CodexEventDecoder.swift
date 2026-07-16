@@ -8,6 +8,8 @@ import Foundation
 /// - `tool.approval_required` / `tool.approval_resolved`
 /// - `agent.question` / `agent.question_answered`
 /// - `agent.turn.started` / `agent.turn.completed`
+/// - Codex native lifecycle hooks (`SessionStart`, `PermissionRequest`, etc.)
+/// - `session.reconciled` from bounded local transcript metadata catch-up
 ///
 /// Anything else is treated as unknown: raw metadata preserved, no crash.
 public struct CodexEventDecoder: EventDecoding, Sendable {
@@ -23,6 +25,17 @@ public struct CodexEventDecoder: EventDecoding, Sendable {
         "agent.question_answered",
         "agent.turn.started",
         "agent.turn.completed",
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PermissionRequest",
+        "PostToolUse",
+        "Stop",
+        "SubagentStart",
+        "SubagentStop",
+        "PreCompact",
+        "PostCompact",
+        "session.reconciled",
     ]
 
     public init() {}
@@ -88,15 +101,21 @@ public struct CodexEventDecoder: EventDecoding, Sendable {
         }
 
         switch type {
-        case "session.started":
+        case "session.started", "SessionStart":
             result.state = .running
             if result.summaryHint == nil {
                 result.summaryHint = "Session started"
             }
-        case "session.updated", "agent.turn.started":
+        case "session.updated", "agent.turn.started", "UserPromptSubmit",
+             "PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop",
+             "PreCompact", "PostCompact":
             result.state = .running
-        case "agent.turn.completed":
+        case "agent.turn.completed", "Stop":
             result.state = .idle
+            if type == "Stop", result.summaryHint == nil {
+                // Prefer empty — UI maps idle without a stale "Waiting" subtitle.
+                result.summaryHint = nil
+            }
         case "session.completed":
             result.state = .completed
         case "session.failed":
@@ -106,8 +125,11 @@ public struct CodexEventDecoder: EventDecoding, Sendable {
             }
         case "session.cancelled":
             result.state = .cancelled
-        case "tool.approval_required":
-            let requestId = EventDecodeHelpers.string(payload, "request_id", "id", "approval_id")
+        case "tool.approval_required", "PermissionRequest":
+            // Same correlation priority as ``HookDecisionTranslator/decisionRequestId(for:)``
+            // so UI Approve/Deny unblocks the waiting forwarder when both `id` and
+            // `tool_use_id` are present.
+            let requestId = Self.approvalCorrelationId(from: payload)
                 ?? envelope.id.uuidString
             let tool = EventDecodeHelpers.string(payload, "tool", "tool_name", "name") ?? "tool"
             let summary = EventDecodeHelpers.string(payload, "summary", "description", "title")
@@ -124,14 +146,19 @@ public struct CodexEventDecoder: EventDecoding, Sendable {
             )
             result.state = .waitingForApproval
             result.summaryHint = result.summaryHint ?? summary
+        case "session.reconciled":
+            // Transcript metadata is recovery context, never a live-state claim.
+            result.state = .idle
+            result.summaryHint = result.summaryHint ?? "Recovered from local Codex history"
         case "tool.approval_resolved":
             result.clearApproval = true
+            result.resolvedApprovalId = Self.approvalCorrelationId(from: payload)
             result.state = .running
             if let approved = EventDecodeHelpers.bool(payload, "approved", "ok") {
                 result.summaryHint = approved ? "Approval granted" : "Approval denied"
             }
         case "agent.question":
-            let promptId = EventDecodeHelpers.string(payload, "prompt_id", "id", "question_id")
+            let promptId = Self.questionCorrelationId(from: payload)
                 ?? envelope.id.uuidString
             let prompt = EventDecodeHelpers.string(payload, "prompt", "question", "text")
                 ?? "Agent needs input"
@@ -149,12 +176,32 @@ public struct CodexEventDecoder: EventDecoding, Sendable {
             result.summaryHint = result.summaryHint ?? prompt
         case "agent.question_answered":
             result.clearQuestion = true
+            // Same key order as agent.question so create/clear always share an id.
+            result.resolvedQuestionId = Self.questionCorrelationId(from: payload)
             result.state = .running
         default:
             result.isUnknown = true
         }
 
         return result
+    }
+
+    /// Correlation keys for approvals (create + resolve share this order).
+    private static let approvalCorrelationKeys = [
+        "tool_use_id", "toolUseId", "request_id", "approval_id", "id",
+    ]
+
+    /// Correlation keys for questions (create + answer share this order).
+    private static let questionCorrelationKeys = [
+        "prompt_id", "id", "question_id", "request_id",
+    ]
+
+    private static func approvalCorrelationId(from payload: [String: JSONValue]) -> String? {
+        EventDecodeHelpers.string(payload, keys: approvalCorrelationKeys)
+    }
+
+    private static func questionCorrelationId(from payload: [String: JSONValue]) -> String? {
+        EventDecodeHelpers.string(payload, keys: questionCorrelationKeys)
     }
 
     private func riskHint(from payload: [String: JSONValue]) -> ApprovalRiskHint {

@@ -27,35 +27,104 @@ final class AppModel {
     var approvalSheetSessionID: SessionID?
     /// Session currently presenting a question sheet.
     var questionSheetSessionID: SessionID?
+    /// Folders / local roots sheet (overlay header).
+    var isFoldersSheetPresented = false
+    /// When false (default), recovered idle stubs stay out of the main list.
+    var showQuietSessions = false
+    /// Session rows expanded to show last signal + timeline (UI-only).
+    var expandedDetailSessionIDs: Set<SessionID> = []
 
     let store = SessionStore()
     private var settingsStore: SettingsStore?
     private var sessionPersistence: SessionPersistence?
     private var persistencePaths: PersistencePaths?
     private var socketServer: EventSocketServer?
+    private var permissionBroker: PermissionBroker?
     private var observeTask: Task<Void, Never>?
     private var socketTask: Task<Void, Never>?
+    private var reconciliationTask: Task<Void, Never>?
+    private var autoAllowTask: Task<Void, Never>?
+    private var detailEnrichmentTask: Task<Void, Never>?
     private let jumpBack = JumpBackCoordinator()
     private var responseTransport: (any ResponseTransporting)?
     private let overlay = OverlayController()
     private var lastAttentionCount = 0
     private var systemReduceMotion = false
+    /// Request ids already auto-allowed this process (avoid re-entry loops).
+    private var autoAllowedRequestIDs: Set<String> = []
+    /// Session ids recently enriched from local logs (throttle).
+    private var lastDetailEnrichmentAt: [SessionID: Date] = [:]
+    private let detailReader = CodexRolloutTailReader()
 
     /// Combined reduce-motion: user setting OR system accessibility preference.
     var prefersReducedMotion: Bool {
         settings.reduceMotion || systemReduceMotion
     }
 
-    /// Sessions for list surfaces: attention-first, capped by settings.
+    /// Sessions for list surfaces: live / attention first; recovery stubs hidden by default.
     var visibleSessions: [Session] {
-        SessionPresentation.sortedForDisplay(
+        SessionPresentation.sessionsForDisplay(
             snapshot.sessions,
-            limit: settings.maxVisibleSessions
+            limit: settings.maxVisibleSessions,
+            includeQuiet: showQuietSessions
         )
+    }
+
+    var quietSessionCount: Int {
+        SessionPresentation.quietSessionCount(in: snapshot.sessions)
+    }
+
+    func isSessionDetailExpanded(_ id: SessionID) -> Bool {
+        expandedDetailSessionIDs.contains(id)
+    }
+
+    func toggleSessionDetail(_ id: SessionID) {
+        if expandedDetailSessionIDs.contains(id) {
+            expandedDetailSessionIDs.remove(id)
+        } else {
+            expandedDetailSessionIDs.insert(id)
+            // Selecting for keyboard / approval rail consistency.
+            selectedSessionID = id
+        }
+    }
+
+    var recoveryStubCount: Int {
+        SessionPresentation.recoveryStubCount(in: snapshot.sessions)
     }
 
     var attentionCount: Int {
         snapshot.sessionsNeedingAttention.count
+    }
+
+    var liveSessionCount: Int {
+        snapshot.sessions.filter { !$0.isQuiet && !$0.isRecoveryStub || $0.state.needsAttention || $0.state == .running }.count
+    }
+
+    /// Session that drives the compact notch live line (attention → running → newest).
+    var primaryLiveSession: Session? {
+        SessionPresentation.primaryLiveSession(from: snapshot.sessions)
+    }
+
+    /// Compact pill / live status text.
+    var liveActivityLine: String {
+        SessionPresentation.liveActivityLine(
+            sessions: snapshot.sessions,
+            socketRunning: isSocketRunning
+        )
+    }
+
+    /// Dynamic Island content for the compact notch.
+    var pillIslandContent: PillIslandContent {
+        PillIslandPresentation.content(
+            sessions: snapshot.sessions,
+            socketRunning: isSocketRunning
+        )
+    }
+
+    /// Morph the compact island when mode / activity changes.
+    func refreshPillIslandLayout() {
+        guard settings.showFloatingPill, !isOverlayExpanded else { return }
+        overlay.refreshIslandLayout(reduceMotion: prefersReducedMotion, animated: true)
     }
 
     var selectedSession: Session? {
@@ -135,9 +204,21 @@ final class AppModel {
             responseTransport = FileResponseTransport(paths: paths)
 
             _ = await store.hydrate(from: persistence)
+            // Relabel ses_* misfiled as Claude and soft-idle stuck Running rows.
+            let repaired = await store.repairAllOpenCodeSessions()
             await store.setPolicy(SessionStorePolicy(autoPersist: true))
-            statusMessage = "Listening…"
+            statusMessage = repaired > 0
+                ? "Listening… (repaired \(repaired) OpenCode sessions)"
+                : "Listening…"
             await startSocket(path: paths.socketURL)
+
+            // Live hooks are ready before optional disk catch-up begins.
+            reconciliationTask?.cancel()
+            reconciliationTask = Task { [weak self] in
+                await self?.reconcileLocalAgentSessions()
+                // Re-repair after recovery injects old OpenCode rows.
+                _ = await self?.store.repairAllOpenCodeSessions()
+            }
         } catch {
             statusMessage = "Startup error: \(error.localizedDescription)"
             isSocketRunning = false
@@ -164,21 +245,139 @@ final class AppModel {
         syncOverlayVisibility()
     }
 
+    /// Recover session identity from local Codex / OpenCode / Grok storage.
+    /// Lifecycle hooks / plugin remain authoritative for live state.
+    private func reconcileLocalAgentSessions() async {
+        await reconcileLocalCodexSessions()
+        await reconcileLocalOpenCodeSessions()
+        await reconcileLocalGrokSessions()
+    }
+
+    private func reconcileLocalCodexSessions() async {
+        let scanner = CodexTranscriptScanner.resolve()
+        let readLogs = settings.readLocalAgentLogs
+        let reader = detailReader
+        do {
+            let snapshots = try await withThrowingTaskGroup(
+                of: [CodexTranscriptSnapshot].self
+            ) { group in
+                group.addTask { try scanner.scan() }
+                return try await group.next() ?? []
+            }
+            // Parse tails off the UI actor; apply snapshots back on the store.
+            let details: [SessionDetailSnapshot] = readLogs
+                ? await withTaskGroup(of: SessionDetailSnapshot?.self) { group in
+                    for snapshot in snapshots {
+                        let path = snapshot.transcriptPath
+                        let sid = SessionID(snapshot.sessionId)
+                        group.addTask {
+                            reader.read(sessionId: sid, transcriptPath: path)
+                        }
+                    }
+                    var out: [SessionDetailSnapshot] = []
+                    for await detail in group {
+                        if let detail { out.append(detail) }
+                    }
+                    return out
+                }
+                : []
+            for snapshot in snapshots {
+                _ = await store.apply(snapshot.envelope())
+            }
+            for detail in details {
+                _ = await store.applyDetailSnapshot(detail)
+            }
+        } catch {
+            // Optional catch-up; fail-open.
+        }
+    }
+
+    private func reconcileLocalOpenCodeSessions() async {
+        let scanner = OpenCodeSessionScanner.resolve()
+        do {
+            let snapshots = try await withThrowingTaskGroup(
+                of: [OpenCodeSessionSnapshot].self
+            ) { group in
+                group.addTask { try scanner.scan() }
+                return try await group.next() ?? []
+            }
+            for snapshot in snapshots {
+                _ = await store.apply(snapshot.envelope())
+            }
+        } catch {
+            // Reconciliation is optional and fail-open. Socket hooks still start.
+        }
+    }
+
+    private func reconcileLocalGrokSessions() async {
+        let scanner = GrokSessionScanner.resolve()
+        do {
+            let snapshots = try await withThrowingTaskGroup(
+                of: [GrokSessionSnapshot].self
+            ) { group in
+                group.addTask { try scanner.scan() }
+                return try await group.next() ?? []
+            }
+            for snapshot in snapshots {
+                _ = await store.apply(snapshot.envelope())
+            }
+        } catch {
+            // Optional catch-up; fail-open.
+        }
+    }
+
     // MARK: - Session actions
 
     /// Submit an approval decision. Returns `true` only after a successful local record.
+    ///
+    /// - Parameters:
+    ///   - note: Optional feedback on deny (or annotate allow).
+    ///   - scope: `.sessionTool` sticky-allows this tool name for the session (local only).
     @discardableResult
-    func approve(_ request: ApprovalRequest, approved: Bool) async -> Bool {
+    func approve(
+        _ request: ApprovalRequest,
+        approved: Bool,
+        note: String? = nil,
+        scope: ApprovalScope = .once
+    ) async -> Bool {
+        let trimmedNote = note?.trimmingCharacters(in: .whitespacesAndNewlines)
         let decision = ApprovalDecision(
             requestId: request.id,
             sessionId: request.sessionId,
-            approved: approved
+            approved: approved,
+            note: (trimmedNote?.isEmpty == false) ? trimmedNote : nil,
+            scope: scope
         )
         do {
             try await responseTransport?.submit(.approval(decision))
             _ = await store.applyLocalResponse(.approval(decision))
-            // Local file-drop only — does not claim the external agent consumed it.
-            statusMessage = approved ? "Recorded approval" : "Recorded denial"
+            // Unblock PermissionRequest hook forwarder / OpenCode plugin waiting on the socket.
+            await permissionBroker?.complete(
+                approvalRequestId: request.id,
+                approved: approved,
+                message: decision.note
+            )
+            // Route product-specific decision transport via AgentRegistry / adapters.
+            let profile = await permissionProfile(for: request)
+            if profile.decisionTransport == .http
+                || (profile.source == .opencode)
+                || OpenCodeAgentAdapter().shouldDeliverHTTPPermission(for: request)
+            {
+                await deliverOpenCodePermission(
+                    request: request,
+                    approved: approved,
+                    scope: scope
+                )
+            }
+            if approved {
+                statusMessage = scope == .sessionTool
+                    ? "Approved for agent (session always-allow)"
+                    : "Approved for agent"
+            } else {
+                statusMessage = decision.note == nil
+                    ? "Denied for agent"
+                    : "Denied for agent with note"
+            }
             if approvalSheetSessionID == request.sessionId {
                 approvalSheetSessionID = nil
             }
@@ -187,6 +386,66 @@ final class AppModel {
             statusMessage = "Response failed: \(error.localizedDescription)"
             return false
         }
+    }
+
+    /// Resolve which agent profile owns a permission decision.
+    private func permissionProfile(for request: ApprovalRequest) async -> AgentProfile {
+        if let session = await store.session(id: request.sessionId) {
+            return AgentRegistry.profile(for: session)
+        }
+        if let raw = request.raw["source"]?.stringValue {
+            return AgentRegistry.profile(parsing: raw)
+        }
+        if OpenCodeSessionIdentity.isOpenCodeSessionId(request.sessionId.rawValue) {
+            return AgentRegistry.opencode
+        }
+        return AgentRegistry.unknown
+    }
+
+    /// Best-effort OpenCode server permission reply (fail-open).
+    private func deliverOpenCodePermission(
+        request: ApprovalRequest,
+        approved: Bool,
+        scope: ApprovalScope
+    ) async {
+        guard let pair = OpenCodePermissionClient.correlation(from: request) else { return }
+        var bases = OpenCodePermissionClient.defaultBaseURLs()
+        if let raw = request.raw["opencode_server_url"]?.stringValue
+            ?? request.raw["opencode_base_url"]?.stringValue
+            ?? request.raw["server_url"]?.stringValue
+            ?? request.raw["opencode_server_url"]?.stringValue,
+           let url = URL(string: raw)
+        {
+            bases.insert(url, at: 0)
+        }
+        // Also check payload-style keys mirrored into approval raw.
+        if let raw = request.raw["payload"]?.objectValue?["opencode_server_url"]?.stringValue,
+           let url = URL(string: raw)
+        {
+            bases.insert(url, at: 0)
+        }
+        let client = OpenCodePermissionClient(baseURLs: bases)
+        let response = OpenCodePermissionResponse.from(approved: approved, scope: scope)
+        let ok = await client.reply(
+            sessionId: pair.sessionId,
+            permissionId: pair.permissionId,
+            response: response
+        )
+        if ok {
+            statusMessage = approved
+                ? "Approved in OpenCode"
+                : "Denied in OpenCode"
+        }
+    }
+
+    /// Local folder roots for the Folders sheet (existence-checked).
+    var folderEntries: [FolderEntry] {
+        FolderEntry.resolve(appSupportPath: persistencePaths?.root.path)
+    }
+
+    func revealFolder(_ entry: FolderEntry) {
+        revealInFinder(entry.path)
+        noteStatus("Revealed \(entry.title)")
     }
 
     /// Submit a freeform / choice answer. Returns `true` only after a successful local record.
@@ -394,7 +653,9 @@ final class AppModel {
 
     private func startSocket(path: URL) async {
         await stopSocket()
-        let server = EventSocketServer(path: path)
+        let broker = PermissionBroker()
+        permissionBroker = broker
+        let server = EventSocketServer(path: path, permissionBroker: broker)
         socketServer = server
         do {
             let stream = try await server.start()
@@ -416,6 +677,7 @@ final class AppModel {
         socketTask = nil
         await socketServer?.stop()
         socketServer = nil
+        permissionBroker = nil
         isSocketRunning = false
     }
 
@@ -423,6 +685,7 @@ final class AppModel {
 
     private func handleSnapshot(_ snap: SessionStoreSnapshot) {
         let previousAttention = lastAttentionCount
+        let previousMode = pillIslandContent.mode
         snapshot = snap
         lastAttentionCount = snap.sessionsNeedingAttention.count
 
@@ -440,6 +703,81 @@ final class AppModel {
            isBootstrapped
         {
             playAttentionSound()
+        }
+
+        // Morph island size when activity mode changes (Dynamic Island dynamics).
+        let nextMode = pillIslandContent.mode
+        if previousMode != nextMode || lastAttentionCount != previousAttention {
+            refreshPillIslandLayout()
+        }
+
+        scheduleLocalAlwaysAllow(from: snap)
+        scheduleDetailEnrichment(from: snap)
+    }
+
+    /// Bounded local JSONL enrichment when `readLocalAgentLogs` is on (default).
+    private func scheduleDetailEnrichment(from snap: SessionStoreSnapshot) {
+        guard settings.readLocalAgentLogs else { return }
+        let now = Date()
+        var targets: [(SessionID, String)] = []
+        for session in snap.sessions {
+            guard let path = session.transcriptPath, !path.isEmpty else { continue }
+            if let last = lastDetailEnrichmentAt[session.id],
+               now.timeIntervalSince(last) < 8
+            {
+                continue
+            }
+            // Refresh when missing snapshot or stats lack tokens while path exists.
+            if session.detailSnapshot == nil || session.stats.tokensIn == nil {
+                targets.append((session.id, path))
+            }
+            if targets.count >= 4 { break }
+        }
+        guard !targets.isEmpty else { return }
+
+        for (id, _) in targets {
+            lastDetailEnrichmentAt[id] = now
+        }
+
+        detailEnrichmentTask?.cancel()
+        detailEnrichmentTask = Task { [weak self, detailReader] in
+            guard let self else { return }
+            for (id, path) in targets {
+                if Task.isCancelled { return }
+                let snapshot = detailReader.read(sessionId: id, transcriptPath: path)
+                guard let snapshot else { continue }
+                _ = await self.store.applyDetailSnapshot(snapshot)
+            }
+        }
+    }
+
+    /// Auto-approve pending tools the user sticky-allowed for this session.
+    /// Completes the PermissionRequest hook so Codex proceeds without a second prompt.
+    private func scheduleLocalAlwaysAllow(from snap: SessionStoreSnapshot) {
+        var pending: [ApprovalRequest] = []
+        for session in snap.sessions {
+            guard let approval = session.pendingApproval else { continue }
+            let key = Session.normalizedToolName(approval.toolName)
+            guard !key.isEmpty,
+                  session.sessionAlwaysAllowTools.contains(key),
+                  !autoAllowedRequestIDs.contains(approval.id)
+            else { continue }
+            pending.append(approval)
+        }
+        guard !pending.isEmpty else { return }
+
+        for approval in pending {
+            autoAllowedRequestIDs.insert(approval.id)
+        }
+
+        autoAllowTask?.cancel()
+        autoAllowTask = Task { [weak self] in
+            guard let self else { return }
+            for approval in pending {
+                if Task.isCancelled { return }
+                // Completes broker via approve() so a waiting forwarder unblocks.
+                _ = await self.approve(approval, approved: true, scope: .once)
+            }
         }
     }
 

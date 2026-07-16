@@ -22,6 +22,14 @@ let package = Package(
         .target(
             name: "NocturnalCore",
             path: "Sources/NocturnalCore",
+            // Bundle the OpenCode plugin template so packaged nocturnal-setup
+            // never falls back to an empty stub when #filePath is unavailable.
+            resources: [
+                // .process flattens non-source files to the bundle root so
+                // Bundle.module.url(forResource:withExtension:) finds the JS
+                // without a subdirectory: argument (see HookInstaller).
+                .process("Hooks/OpenCodeBridge.plugin.js"),
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]

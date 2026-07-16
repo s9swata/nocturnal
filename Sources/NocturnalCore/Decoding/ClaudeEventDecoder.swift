@@ -115,13 +115,8 @@ public struct ClaudeEventDecoder: EventDecoding, Sendable {
             )
 
             if requiresPermission {
-                let requestId = EventDecodeHelpers.string(
-                    payload,
-                    "tool_use_id",
-                    "toolUseId",
-                    "id",
-                    "request_id"
-                ) ?? envelope.id.uuidString
+                let requestId = Self.approvalCorrelationId(from: payload)
+                    ?? envelope.id.uuidString
                 let tool = EventDecodeHelpers.string(payload, "tool_name", "tool", "name") ?? "tool"
                 let summary = EventDecodeHelpers.string(payload, "summary", "description")
                     ?? "Approve \(tool)?"
@@ -146,6 +141,8 @@ public struct ClaudeEventDecoder: EventDecoding, Sendable {
             }
         case "tool.approval_resolved":
             result.clearApproval = true
+            // Mirror create-path key priority so resolved id matches pendingApproval.id.
+            result.resolvedApprovalId = Self.approvalCorrelationId(from: payload)
             result.state = .running
         case "Notification":
             result.state = nil // summary only
@@ -153,7 +150,8 @@ public struct ClaudeEventDecoder: EventDecoding, Sendable {
                 result.summaryHint = "Notification"
             }
         case "agent.question":
-            let promptId = EventDecodeHelpers.string(payload, "id", "prompt_id") ?? envelope.id.uuidString
+            let promptId = Self.questionCorrelationId(from: payload)
+                ?? envelope.id.uuidString
             let prompt = EventDecodeHelpers.string(payload, "prompt", "question", "message")
                 ?? "Agent needs input"
             result.question = QuestionPrompt(
@@ -169,6 +167,8 @@ public struct ClaudeEventDecoder: EventDecoding, Sendable {
             result.state = .waitingForInput
         case "agent.question_answered":
             result.clearQuestion = true
+            // Mirror create-path key priority so resolved id matches pendingQuestion.id.
+            result.resolvedQuestionId = Self.questionCorrelationId(from: payload)
             result.state = .running
         default:
             result.isUnknown = true
@@ -227,6 +227,24 @@ public struct ClaudeEventDecoder: EventDecoding, Sendable {
         }
         // Unknown mode: do not invent an approval gate.
         return false
+    }
+
+    /// Correlation keys for approvals (create + resolve share this order).
+    private static let approvalCorrelationKeys = [
+        "tool_use_id", "toolUseId", "id", "request_id",
+    ]
+
+    /// Correlation keys for questions (create + answer share this order).
+    private static let questionCorrelationKeys = [
+        "id", "prompt_id", "request_id",
+    ]
+
+    private static func approvalCorrelationId(from payload: [String: JSONValue]) -> String? {
+        EventDecodeHelpers.string(payload, keys: approvalCorrelationKeys)
+    }
+
+    private static func questionCorrelationId(from payload: [String: JSONValue]) -> String? {
+        EventDecodeHelpers.string(payload, keys: questionCorrelationKeys)
     }
 
     private func riskHint(from payload: [String: JSONValue]) -> ApprovalRiskHint {

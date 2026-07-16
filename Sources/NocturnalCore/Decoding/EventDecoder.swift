@@ -24,15 +24,24 @@ public struct EventDecodeMetrics: Sendable, Equatable {
 public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
     private let codex: CodexEventDecoder
     private let claude: ClaudeEventDecoder
+    private let opencode: OpenCodeEventDecoder
+    private let grok: GrokEventDecoder
+    private let cursor: CursorEventDecoder
     private let lock = NSLock()
     private var metrics = EventDecodeMetrics()
 
     public init(
         codex: CodexEventDecoder = CodexEventDecoder(),
-        claude: ClaudeEventDecoder = ClaudeEventDecoder()
+        claude: ClaudeEventDecoder = ClaudeEventDecoder(),
+        opencode: OpenCodeEventDecoder = OpenCodeEventDecoder(),
+        grok: GrokEventDecoder = GrokEventDecoder(),
+        cursor: CursorEventDecoder = CursorEventDecoder()
     ) {
         self.codex = codex
         self.claude = claude
+        self.opencode = opencode
+        self.grok = grok
+        self.cursor = cursor
     }
 
     public func decode(_ envelope: EventEnvelope) -> DecodedEvent {
@@ -42,7 +51,53 @@ public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
             result = codex.decode(envelope)
         case .claude:
             result = claude.decode(envelope)
+        case .opencode:
+            result = opencode.decode(envelope)
+        case .grokBuild:
+            result = grok.decode(envelope)
+        case .cursor:
+            result = cursor.decode(envelope)
+        case .kimi, .agy:
+            // Tier A: best-effort structural decode via Cursor/Grok/Codex/Claude
+            // shapes, but keep the envelope's product identity (Cursor decoder
+            // always stamps inferredSource = .cursor).
+            var structural = cursor.decode(envelope)
+            if structural.isUnknown {
+                structural = grok.decode(envelope)
+            }
+            if structural.isUnknown {
+                structural = codex.decode(envelope)
+            }
+            if structural.isUnknown {
+                let claudeResult = claude.decode(envelope)
+                structural = claudeResult.isUnknown
+                    ? Self.unknownPassthrough(envelope)
+                    : claudeResult
+            }
+            structural.inferredSource = envelope.source
+            result = structural
         case .unknown:
+            // OpenCode ses_* / native bus names — never Claude by accident.
+            if OpenCodeSessionIdentity.isOpenCodeSessionId(envelope.sessionId)
+                || OpenCodeEventDecoder.implementedEventTypes.contains(envelope.eventType)
+                    && !CodexEventDecoder.implementedEventTypes.contains(envelope.eventType)
+                    && !ClaudeEventDecoder.implementedEventTypes.contains(envelope.eventType)
+            {
+                result = opencode.decode(envelope)
+                break
+            }
+            // Current Codex and Claude lifecycle names overlap. Without an
+            // explicit source, retain the historical Claude interpretation;
+            // native Codex installs always pass `--wrap-source codex`.
+            // Exception: OpenCode plugin maps to the same PascalCase names but
+            // always uses ses_* ids (handled above).
+            if ClaudeEventDecoder.implementedEventTypes.contains(envelope.eventType),
+               CodexEventDecoder.implementedEventTypes.contains(envelope.eventType),
+               envelope.eventType.first?.isUppercase == true
+            {
+                result = claude.decode(envelope)
+                break
+            }
             // Try both; prefer first non-unknown structured decode.
             // Unrecognized source strings (including obsolete labels) land here.
             let codexResult = codex.decode(envelope)
@@ -53,7 +108,15 @@ public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
                 if !claudeResult.isUnknown {
                     result = claudeResult
                 } else {
-                    result = Self.unknownPassthrough(envelope)
+                    let openResult = opencode.decode(envelope)
+                    if !openResult.isUnknown {
+                        result = openResult
+                    } else {
+                        let grokResult = grok.decode(envelope)
+                        result = grokResult.isUnknown
+                            ? Self.unknownPassthrough(envelope)
+                            : grokResult
+                    }
                 }
             }
         }
@@ -106,6 +169,11 @@ public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
 /// Shared helpers for source-specific decoders.
 public enum EventDecodeHelpers {
     public static func string(_ payload: [String: JSONValue], _ keys: String...) -> String? {
+        string(payload, keys: keys)
+    }
+
+    /// Array form for shared create/resolve key lists (order matters).
+    public static func string(_ payload: [String: JSONValue], keys: [String]) -> String? {
         for key in keys {
             if let value = payload[key]?.stringValue, !value.isEmpty {
                 return value
@@ -279,14 +347,32 @@ public struct EnvelopeNormalizer: Sendable {
 
         let inferredSource: AgentSource = {
             if defaultSource != .unknown { return defaultSource }
+            // Cursor payloads always carry conversation_id + cursor_version / workspace_roots.
+            if object["cursor_version"] != nil
+                || object["conversation_id"] != nil && object["workspace_roots"] != nil
+            {
+                return .cursor
+            }
+            // Grok runner injects GROK_* env; payload still looks Claude-like.
+            // Prefer explicit wrap-source; without it, keep historical Claude bias
+            // for bare hook_event_name (Claude installs never set wrap-source grok).
             if object["hook_event_name"] != nil || object["hookEventName"] != nil {
                 return .claude
             }
             if ClaudeEventDecoder.implementedEventTypes.contains(eventType) {
                 return .claude
             }
+            // Prefer Codex over Grok for shared NAP names (e.g. session.reconciled)
+            // so source-less recovery envelopes keep historical Codex identity.
             if CodexEventDecoder.implementedEventTypes.contains(eventType) {
                 return .codex
+            }
+            if GrokEventDecoder.implementedEventTypes.contains(eventType)
+                || GrokEventDecoder.implementedEventTypes.contains(
+                    GrokEventDecoder.normalizeEventType(eventType)
+                )
+            {
+                return .grokBuild
             }
             return .unknown
         }()

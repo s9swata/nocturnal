@@ -4,12 +4,19 @@ import Foundation
 public enum HookProduct: String, Sendable, CaseIterable {
     case codex
     case claude
+    case opencode
+    /// Grok Build (`~/.grok/hooks/*.json`).
+    case grok
+    /// Cursor Agent (`~/.cursor/hooks.json`).
+    case cursor
 }
 
 public enum HookInstallAction: String, Sendable {
     case install
     case uninstall
     case status
+    case doctor
+    case repair
 }
 
 /// How aggressively to write agent config.
@@ -51,7 +58,7 @@ public struct HookInstallResult: Sendable, Equatable {
     }
 }
 
-/// Safe, idempotent hook installer for Codex + Claude.
+/// Safe, idempotent hook installer for Codex, Claude, OpenCode, Grok Build, and Cursor.
 ///
 /// **Never** uses real user homes in unit tests. Pass ``configRoot`` pointing
 /// at a temporary directory, or set `NOCTURNAL_CONFIG_ROOT`.
@@ -60,27 +67,84 @@ public struct HookInstallResult: Sendable, Equatable {
 ///
 /// | Product | Sidecar | Native merge target |
 /// |---------|---------|---------------------|
-/// | Codex | `.codex/nocturnal-hooks.json` | `.codex/hooks.json` (JSON array/object of hook commands) |
+/// | Codex | `.codex/nocturnal-hooks.json` | `.codex/hooks.json` (event map with nested command handlers) |
 /// | Claude | `.claude/nocturnal-hooks.json` | `.claude/settings.json` (`hooks` key) |
+/// | OpenCode | `.config/opencode/nocturnal-hooks.json` | `.config/opencode/plugins/nocturnal-bridge.js` |
+/// | Grok | `.grok/nocturnal-hooks.json` | `.grok/hooks/nocturnal.json` (lifecycle command hooks) |
+/// | Cursor | `.cursor/nocturnal-hooks.json` | `.cursor/hooks.json` (`version` + camelCase agent hooks) |
 ///
-/// Native formats evolve; merge is best-effort and always preceded by a timestamped
-/// backup under Application Support `backups/`. Sidecar remains the authoritative
-/// Nocturnal-owned descriptor.
+/// Native formats evolve; changed files receive a timestamped backup under
+/// Application Support `backups/`. The sidecar is a Nocturnal-owned descriptor,
+/// but only native product config is consumed by the agents.
 public struct HookInstaller: Sendable {
     public static let managedMarkerBegin = "# >>> nocturnal-managed"
     public static let managedMarkerEnd = "# <<< nocturnal-managed"
     public static let managedKey = "nocturnalManaged"
     public static let managedCommandMarker = "nocturnal-hook-forwarder"
+    public static let openCodePluginFileName = "nocturnal-bridge.js"
+    public static let openCodePluginMarker = "nocturnal-opencode-bridge"
+    public static let grokHookFileName = "nocturnal.json"
+    public static let grokWrapSourceFlag = "--wrap-source grok-build"
+    public static let cursorWrapSourceFlag = "--wrap-source cursor"
+
+    /// Grok Build lifecycle events installed into `~/.grok/hooks/nocturnal.json`.
+    public static let grokLifecycleEvents = [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "Stop",
+        "SessionEnd",
+        "Notification",
+        "SubagentStart",
+        "SubagentStop",
+    ]
+
+    /// Cursor Agent hooks installed into `~/.cursor/hooks.json` (camelCase keys).
+    public static let cursorLifecycleEvents = [
+        "sessionStart",
+        "sessionEnd",
+        "beforeSubmitPrompt",
+        "preToolUse",
+        "postToolUse",
+        "postToolUseFailure",
+        "beforeShellExecution",
+        "afterShellExecution",
+        "afterFileEdit",
+        "stop",
+        "subagentStart",
+        "subagentStop",
+        "preCompact",
+    ]
 
     public var configRoot: URL
+    /// Explicit Codex home (`CODEX_HOME`). Nil means `<configRoot>/.codex`.
+    public var codexHome: URL?
+    /// Explicit Grok home (`GROK_HOME`). Nil means `<configRoot>/.grok`.
+    /// Ignored when `NOCTURNAL_CONFIG_ROOT` is set (test isolation).
+    public var grokHome: URL?
     public var forwarderBinaryPath: URL
     public var socketPath: URL
     public var backupsDirectory: URL
     public var mode: HookInstallMode
     public var dryRun: Bool
 
+    /// Codex lifecycle hooks supported by the current native adapter.
+    /// The shape is verified against Codex CLI 0.144.1 and the current hooks docs.
+    public static let codexLifecycleEvents = [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PermissionRequest",
+        "PostToolUse",
+        "Stop",
+    ]
+
     public init(
         configRoot: URL,
+        codexHome: URL? = nil,
+        grokHome: URL? = nil,
         forwarderBinaryPath: URL,
         socketPath: URL,
         backupsDirectory: URL,
@@ -88,6 +152,8 @@ public struct HookInstaller: Sendable {
         dryRun: Bool = false
     ) {
         self.configRoot = configRoot
+        self.codexHome = codexHome
+        self.grokHome = grokHome
         self.forwarderBinaryPath = forwarderBinaryPath
         self.socketPath = socketPath
         self.backupsDirectory = backupsDirectory
@@ -115,8 +181,25 @@ public struct HookInstaller: Sendable {
         // Socket resolution lives in PersistencePaths (NOCTURNAL_SOCKET + default).
         let paths = try PersistencePaths.resolve(fileManager: fileManager, environment: environment)
 
+        // Test redirection always wins; never escape NOCTURNAL_CONFIG_ROOT.
+        let underTestRoot = environment[NocturnalEnvironmentKey.configRoot.rawValue]?.isEmpty == false
+
+        let codexHome: URL? = {
+            if underTestRoot { return nil }
+            guard let raw = environment["CODEX_HOME"], !raw.isEmpty else { return nil }
+            return URL(fileURLWithPath: raw, isDirectory: true)
+        }()
+
+        let grokHome: URL? = {
+            if underTestRoot { return nil }
+            guard let raw = environment["GROK_HOME"], !raw.isEmpty else { return nil }
+            return URL(fileURLWithPath: raw, isDirectory: true)
+        }()
+
         return HookInstaller(
             configRoot: home,
+            codexHome: codexHome,
+            grokHome: grokHome,
             forwarderBinaryPath: forwarderBinaryPath,
             socketPath: paths.socketURL,
             backupsDirectory: paths.backupsDirectory,
@@ -128,12 +211,20 @@ public struct HookInstaller: Sendable {
     public func configURL(for product: HookProduct) -> URL {
         switch product {
         case .codex:
-            return configRoot
-                .appendingPathComponent(".codex", isDirectory: true)
+            return (codexHome ?? configRoot.appendingPathComponent(".codex", isDirectory: true))
                 .appendingPathComponent("nocturnal-hooks.json")
         case .claude:
             return configRoot
                 .appendingPathComponent(".claude", isDirectory: true)
+                .appendingPathComponent("nocturnal-hooks.json")
+        case .opencode:
+            return openCodeConfigDirectory()
+                .appendingPathComponent("nocturnal-hooks.json")
+        case .grok:
+            return grokHomeDirectory()
+                .appendingPathComponent("nocturnal-hooks.json")
+        case .cursor:
+            return cursorHomeDirectory()
                 .appendingPathComponent("nocturnal-hooks.json")
         }
     }
@@ -142,34 +233,86 @@ public struct HookInstaller: Sendable {
     public func nativeConfigURL(for product: HookProduct) -> URL {
         switch product {
         case .codex:
-            return configRoot
-                .appendingPathComponent(".codex", isDirectory: true)
+            return (codexHome ?? configRoot.appendingPathComponent(".codex", isDirectory: true))
                 .appendingPathComponent("hooks.json")
         case .claude:
             return configRoot
                 .appendingPathComponent(".claude", isDirectory: true)
                 .appendingPathComponent("settings.json")
+        case .opencode:
+            return openCodePluginsDirectory()
+                .appendingPathComponent(Self.openCodePluginFileName)
+        case .grok:
+            return grokHooksDirectory()
+                .appendingPathComponent(Self.grokHookFileName)
+        case .cursor:
+            return cursorHomeDirectory()
+                .appendingPathComponent("hooks.json")
         }
+    }
+
+    /// Grok Build home: `GROK_HOME` when set in production, else `<configRoot>/.grok`.
+    public func grokHomeDirectory() -> URL {
+        if let grokHome { return grokHome }
+        return configRoot.appendingPathComponent(".grok", isDirectory: true)
+    }
+
+    /// Grok auto-loaded hook JSON directory.
+    public func grokHooksDirectory() -> URL {
+        grokHomeDirectory().appendingPathComponent("hooks", isDirectory: true)
+    }
+
+    /// Cursor user config home: `<configRoot>/.cursor`.
+    public func cursorHomeDirectory() -> URL {
+        configRoot.appendingPathComponent(".cursor", isDirectory: true)
+    }
+
+    /// OpenCode global config root: `<configRoot>/.config/opencode`.
+    public func openCodeConfigDirectory() -> URL {
+        configRoot
+            .appendingPathComponent(".config", isDirectory: true)
+            .appendingPathComponent("opencode", isDirectory: true)
+    }
+
+    /// OpenCode auto-loaded plugin directory.
+    public func openCodePluginsDirectory() -> URL {
+        openCodeConfigDirectory()
+            .appendingPathComponent("plugins", isDirectory: true)
     }
 
     public func status(product: HookProduct) -> HookInstallResult {
         let url = configURL(for: product)
         let installed = FileManager.default.fileExists(atPath: url.path)
         let native = nativeConfigURL(for: product)
-        let nativeHasManaged = (try? String(contentsOf: native, encoding: .utf8))?.contains(Self.managedCommandMarker) == true
-        var message = installed ? "Nocturnal hooks present (sidecar)" : "Nocturnal hooks not installed"
-        if nativeHasManaged {
-            message += "; native config references forwarder"
-        }
+        let nativeHealth = nativeHookHealth(product: product)
+        var message = installed ? "sidecar present" : "sidecar missing"
+        message += "; \(nativeHealth.message)"
         return HookInstallResult(
             product: product,
             action: .status,
-            succeeded: true,
+            succeeded: nativeHealth.healthy,
             message: message,
             configPath: url.path,
             nativeConfigPath: native.path,
             dryRun: dryRun
         )
+    }
+
+    /// Structural Doctor check. This never writes agent configuration.
+    public func doctor(product: HookProduct) -> HookInstallResult {
+        var result = status(product: product)
+        result.action = .doctor
+        return result
+    }
+
+    /// Repair the Nocturnal-owned portion of native config, preserving valid
+    /// foreign lifecycle handlers. Existing files are backed up before writes.
+    public func repair(product: HookProduct) throws -> HookInstallResult {
+        var nativeInstaller = self
+        nativeInstaller.mode = .mergeNative
+        var result = try nativeInstaller.install(product: product)
+        result.action = .repair
+        return result
     }
 
     @discardableResult
@@ -198,7 +341,7 @@ public struct HookInstaller: Sendable {
                         configPath: url.path,
                         dryRun: dryRun
                     )
-                    if mode == .mergeNative {
+                    if alwaysMergeNative(product) || mode == .mergeNative {
                         let merge = try mergeNative(product: product)
                         result.backupPath = merge.backupPath
                         result.nativeConfigPath = merge.nativeConfigPath
@@ -224,7 +367,8 @@ public struct HookInstaller: Sendable {
         var nativePath: String?
         var mergeBackup: String?
 
-        if mode == .mergeNative {
+        // OpenCode / Grok / Cursor always need native surfaces for live activity.
+        if alwaysMergeNative(product) || mode == .mergeNative {
             let merge = try mergeNative(product: product)
             message += "; \(merge.message)"
             nativePath = merge.nativeConfigPath
@@ -263,7 +407,7 @@ public struct HookInstaller: Sendable {
             messages.append("Nothing to uninstall (sidecar)")
         }
 
-        if mode == .mergeNative {
+        if alwaysMergeNative(product) || mode == .mergeNative {
             let unmerge = try unmergeNative(product: product)
             messages.append(unmerge.message)
             if backupPath == nil { backupPath = unmerge.backupPath }
@@ -289,12 +433,29 @@ public struct HookInstaller: Sendable {
         var nativeConfigPath: String?
     }
 
+    /// Products that always install a native surface even in sidecar mode.
+    ///
+    /// OpenCode's live path is the JS plugin only (no hooks.json equivalent).
+    /// Grok/Cursor respect ``mode`` so `--mode sidecar` stays sidecar-only.
+    private func alwaysMergeNative(_ product: HookProduct) -> Bool {
+        switch product {
+        case .opencode: return true
+        case .codex, .claude, .grok, .cursor: return false
+        }
+    }
+
     private func mergeNative(product: HookProduct) throws -> MergeOutcome {
         switch product {
         case .codex:
             return try mergeCodexNative()
         case .claude:
             return try mergeClaudeNative()
+        case .opencode:
+            return try mergeOpenCodeNative()
+        case .grok:
+            return try mergeGrokNative()
+        case .cursor:
+            return try mergeCursorNative()
         }
     }
 
@@ -304,13 +465,23 @@ public struct HookInstaller: Sendable {
             return try unmergeCodexNative()
         case .claude:
             return try unmergeClaudeNative()
+        case .opencode:
+            return try unmergeOpenCodeNative()
+        case .grok:
+            return try unmergeGrokNative()
+        case .cursor:
+            return try unmergeCursorNative()
         }
     }
 
-    /// Codex `hooks.json`: object with `hooks` array of command strings/objects, or a bare array.
+    /// Codex `hooks.json`: `{ "hooks": { "SessionStart": [{ "hooks": [...] }] } }`.
+    ///
+    /// Top-level unknown keys are rejected by Codex 0.144.1, so ownership is
+    /// identified only by the nested command marker. The sidecar remains an
+    /// optional Nocturnal descriptor; Codex does not consume it.
     private func mergeCodexNative() throws -> MergeOutcome {
         let url = nativeConfigURL(for: .codex)
-        let command = forwarderCommand()
+        let command = codexForwarderCommand()
         let fm = FileManager.default
 
         if !dryRun {
@@ -318,45 +489,69 @@ public struct HookInstaller: Sendable {
         }
 
         var backupPath: String?
-        let managedEntry: [String: Any] = [
-            "command": command,
-            Self.managedKey: true,
-            "events": Array(CodexEventDecoder.implementedEventTypes).sorted(),
-        ]
-        var root: [String: Any] = [
-            Self.managedKey: true,
-            "version": 1,
-            "hooks": [managedEntry],
-        ]
+        var originalRoot: [String: Any]?
+        var root: [String: Any] = ["hooks": [String: Any]()]
 
         if fm.fileExists(atPath: url.path) {
-            // Always backup existing native config before overwrite — including malformed JSON.
+            let data = try Data(contentsOf: url)
+            guard let json = try? JSONSerialization.jsonObject(with: data),
+                  let object = json as? [String: Any]
+            else {
+                if !dryRun {
+                    backupPath = try backupExisting(url: url, product: .codex, label: "native").path
+                } else {
+                    backupPath = "(dry-run backup)"
+                }
+                throw HookInstallerError.invalidCodexHooks(
+                    "hooks.json is not a JSON object; backup created, no rewrite performed"
+                )
+            }
+            originalRoot = object
+            do {
+                root = try migrateCodexRoot(object)
+            } catch {
+                if !dryRun {
+                    backupPath = try backupExisting(url: url, product: .codex, label: "native").path
+                } else {
+                    backupPath = "(dry-run backup)"
+                }
+                throw error
+            }
+        }
+
+        var hooks = root["hooks"] as? [String: Any] ?? [:]
+        for event in Self.codexLifecycleEvents {
+            var groups = hooks[event] as? [[String: Any]] ?? []
+            groups = groups.compactMap(removingManagedCodexHandlers(from:))
+            groups.append([
+                "hooks": [[
+                    "type": "command",
+                    "command": command,
+                    "timeout": 1,
+                ]],
+            ])
+            hooks[event] = groups
+        }
+        root = root.filter { $0.key == "description" || $0.key == "hooks" }
+        root["hooks"] = hooks
+
+        if let originalRoot,
+           jsonObjectsEqual(originalRoot, root)
+        {
+            return MergeOutcome(
+                message: dryRun
+                    ? "Would leave .codex/hooks.json unchanged"
+                    : "Native Codex hooks already healthy (idempotent)",
+                nativeConfigPath: url.path
+            )
+        }
+
+        if originalRoot != nil {
             if !dryRun {
                 backupPath = try backupExisting(url: url, product: .codex, label: "native").path
             } else {
                 backupPath = "(dry-run backup)"
             }
-
-            if let data = try? Data(contentsOf: url),
-               let json = try? JSONSerialization.jsonObject(with: data)
-            {
-                if var obj = json as? [String: Any] {
-                    var hooks = codexHooksArray(from: obj["hooks"])
-                    hooks.removeAll { isManagedCodexHookEntry($0) }
-                    hooks.append(managedEntry)
-                    obj["hooks"] = hooks
-                    obj[Self.managedKey] = true
-                    root = obj
-                } else if let arr = json as? [Any] {
-                    var hooks = arr
-                    hooks.removeAll { isManagedCodexHookEntry($0) }
-                    hooks.append(managedEntry)
-                    // Prefer object shape going forward; preserve non-managed entries (incl. strings).
-                    root = [Self.managedKey: true, "hooks": hooks]
-                }
-                // else: unparseable shape after JSONSerialization — use fresh managed root
-            }
-            // else: invalid JSON — backup already taken; write fresh managed root
         }
 
         if !dryRun {
@@ -386,19 +581,21 @@ public struct HookInstaller: Sendable {
             backupPath = try backupExisting(url: url, product: .codex, label: "native").path
         }
 
-        if var obj = json as? [String: Any] {
-            var hooks = codexHooksArray(from: obj["hooks"])
-            hooks.removeAll { isManagedCodexHookEntry($0) }
-            obj["hooks"] = hooks
-            obj.removeValue(forKey: Self.managedKey)
-            if !dryRun {
-                let out = try JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
-                try out.write(to: url, options: [.atomic])
+        if var root = json as? [String: Any],
+           var hooks = root["hooks"] as? [String: Any]
+        {
+            for event in Array(hooks.keys) {
+                guard let groups = hooks[event] as? [[String: Any]] else { continue }
+                let kept = groups.compactMap(removingManagedCodexHandlers(from:))
+                if kept.isEmpty {
+                    hooks.removeValue(forKey: event)
+                } else {
+                    hooks[event] = kept
+                }
             }
-        } else if let arr = json as? [Any] {
-            let hooks = arr.filter { !isManagedCodexHookEntry($0) }
+            root["hooks"] = hooks
             if !dryRun {
-                let out = try JSONSerialization.data(withJSONObject: hooks, options: [.prettyPrinted, .sortedKeys])
+                let out = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
                 try out.write(to: url, options: [.atomic])
             }
         }
@@ -529,30 +726,595 @@ public struct HookInstaller: Sendable {
         return false
     }
 
-    /// Preserve string-format Codex hook entries when merging (do not drop them).
-    private func codexHooksArray(from value: Any?) -> [Any] {
-        guard let value else { return [] }
-        if let arr = value as? [Any] {
-            return arr
-        }
-        // Single string or object under "hooks" — wrap.
-        if value is String || value is [String: Any] {
-            return [value]
-        }
-        return []
-    }
+    // MARK: - OpenCode plugin bridge
 
-    private func isManagedCodexHookEntry(_ entry: Any) -> Bool {
-        if let command = entry as? String {
-            return command.contains(Self.managedCommandMarker)
+    /// Install the TypeScript/JS plugin OpenCode auto-loads from `plugins/`.
+    private func mergeOpenCodeNative() throws -> MergeOutcome {
+        let url = nativeConfigURL(for: .opencode)
+        let fm = FileManager.default
+        let body = try openCodePluginSource()
+
+        if !dryRun {
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         }
-        if let hook = entry as? [String: Any] {
-            if hook[Self.managedKey] as? Bool == true { return true }
-            if let command = hook["command"] as? String, command.contains(Self.managedCommandMarker) {
-                return true
+
+        var backupPath: String?
+        if fm.fileExists(atPath: url.path) {
+            if let existing = try? String(contentsOf: url, encoding: .utf8), existing == body {
+                return MergeOutcome(
+                    message: dryRun
+                        ? "Would leave OpenCode plugin unchanged"
+                        : "OpenCode plugin already healthy (idempotent)",
+                    nativeConfigPath: url.path
+                )
+            }
+            if !dryRun {
+                backupPath = try backupExisting(url: url, product: .opencode, label: "plugin").path
+            } else {
+                backupPath = "(dry-run backup)"
             }
         }
+
+        if !dryRun {
+            try body.write(to: url, atomically: true, encoding: .utf8)
+        }
+
+        return MergeOutcome(
+            message: dryRun
+                ? "Would install OpenCode plugin \(Self.openCodePluginFileName)"
+                : "Installed OpenCode plugin \(Self.openCodePluginFileName)",
+            backupPath: backupPath,
+            nativeConfigPath: url.path
+        )
+    }
+
+    private func unmergeOpenCodeNative() throws -> MergeOutcome {
+        let url = nativeConfigURL(for: .opencode)
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else {
+            return MergeOutcome(
+                message: "No OpenCode plugin to remove",
+                nativeConfigPath: url.path
+            )
+        }
+
+        // Only remove our managed plugin.
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        guard existing.contains(Self.openCodePluginMarker) || existing.contains(Self.managedMarkerBegin) else {
+            return MergeOutcome(
+                message: "OpenCode plugin present but not Nocturnal-managed; left untouched",
+                nativeConfigPath: url.path
+            )
+        }
+
+        var backupPath: String?
+        if !dryRun {
+            backupPath = try backupExisting(url: url, product: .opencode, label: "plugin").path
+            try fm.removeItem(at: url)
+        } else {
+            backupPath = "(dry-run backup)"
+        }
+
+        return MergeOutcome(
+            message: dryRun ? "Would remove OpenCode plugin" : "Removed OpenCode plugin",
+            backupPath: backupPath,
+            nativeConfigPath: url.path
+        )
+    }
+
+    /// Grok Build `~/.grok/hooks/nocturnal.json` — dedicated file, fail-open command hooks.
+    ///
+    /// Grok merges all `hooks/*.json` files; we own only this file so foreign hooks
+    /// in other files are never rewritten.
+    private func mergeGrokNative() throws -> MergeOutcome {
+        let url = nativeConfigURL(for: .grok)
+        let command = grokForwarderCommand()
+        let fm = FileManager.default
+
+        if !dryRun {
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        }
+
+        var backupPath: String?
+        if fm.fileExists(atPath: url.path) {
+            let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            let desired = grokNativeHooksJSON(command: command)
+            if existing == desired
+                || (existing.contains(Self.managedCommandMarker)
+                    && existing.contains(Self.grokWrapSourceFlag)
+                    && existing.contains(Self.escapeJSONStringContents(socketPath.path)))
+            {
+                // Refresh if socket/forwarder path drifted.
+                if existing == desired {
+                    return MergeOutcome(
+                        message: dryRun
+                            ? "Would skip Grok hooks (already installed)"
+                            : "Grok hooks already installed (idempotent)",
+                        nativeConfigPath: url.path
+                    )
+                }
+            }
+            if !dryRun {
+                backupPath = try backupExisting(url: url, product: .grok, label: "native").path
+            } else {
+                backupPath = "(dry-run backup)"
+            }
+        }
+
+        let body = grokNativeHooksJSON(command: command)
+        if !dryRun {
+            try body.write(to: url, atomically: true, encoding: .utf8)
+        }
+
+        return MergeOutcome(
+            message: dryRun
+                ? "Would install Grok Build hooks (\(Self.grokHookFileName))"
+                : "Installed Grok Build hooks (\(Self.grokHookFileName))",
+            backupPath: backupPath,
+            nativeConfigPath: url.path
+        )
+    }
+
+    private func unmergeGrokNative() throws -> MergeOutcome {
+        let url = nativeConfigURL(for: .grok)
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else {
+            return MergeOutcome(
+                message: "No Grok hooks file to remove",
+                nativeConfigPath: url.path
+            )
+        }
+
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        guard existing.contains(Self.managedCommandMarker) || existing.contains(Self.managedKey) else {
+            return MergeOutcome(
+                message: "Grok hooks file present but not Nocturnal-managed; left untouched",
+                nativeConfigPath: url.path
+            )
+        }
+
+        var backupPath: String?
+        if !dryRun {
+            backupPath = try backupExisting(url: url, product: .grok, label: "native").path
+            try fm.removeItem(at: url)
+        } else {
+            backupPath = "(dry-run backup)"
+        }
+
+        return MergeOutcome(
+            message: dryRun ? "Would remove Grok Build hooks" : "Removed Grok Build hooks",
+            backupPath: backupPath,
+            nativeConfigPath: url.path
+        )
+    }
+
+    /// JSON body for `~/.grok/hooks/nocturnal.json`.
+    public func grokNativeHooksJSON(command: String? = nil) -> String {
+        let cmd = command ?? grokForwarderCommand()
+        let escaped = Self.escapeJSONStringContents(cmd)
+        var eventBlocks: [String] = []
+        for event in Self.grokLifecycleEvents {
+            eventBlocks.append(
+                """
+                    "\(event)": [
+                      {
+                        "\(Self.managedKey)": true,
+                        "hooks": [
+                          {
+                            "type": "command",
+                            "command": "\(escaped)",
+                            "timeout": 8,
+                            "\(Self.managedKey)": true
+                          }
+                        ]
+                      }
+                    ]
+                """
+            )
+        }
+        return """
+        {
+          "\(Self.managedKey)": true,
+          "description": "Nocturnal Grok Build bridge — fail-open live activity",
+          "hooks": {
+        \(eventBlocks.joined(separator: ",\n"))
+          }
+        }
+        """
+    }
+
+    public func grokForwarderCommand() -> String {
+        forwarderCommand() + " \(Self.grokWrapSourceFlag) --timeout 0.5"
+    }
+
+    public func cursorForwarderCommand() -> String {
+        // Absolute paths — Cursor runs user hooks with cwd `~/.cursor/`.
+        forwarderCommand() + " \(Self.cursorWrapSourceFlag) --timeout 0.5"
+    }
+
+    /// Merge Nocturnal handlers into `~/.cursor/hooks.json` without wiping foreign hooks.
+    private func mergeCursorNative() throws -> MergeOutcome {
+        let url = nativeConfigURL(for: .cursor)
+        let command = cursorForwarderCommand()
+        let fm = FileManager.default
+
+        if !dryRun {
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        }
+
+        var backupPath: String?
+        var root: [String: Any] = ["version": 1, "hooks": [String: Any]()]
+
+        if fm.fileExists(atPath: url.path) {
+            if !dryRun {
+                backupPath = try backupExisting(url: url, product: .cursor, label: "native").path
+            } else {
+                backupPath = "(dry-run backup)"
+            }
+            // Existing hooks.json that cannot be parsed as an object with a hooks
+            // map is a safe failure — never replace a schema-shifted file with a
+            // Nocturnal-only root (backup already taken above when not dry-run).
+            guard let data = try? Data(contentsOf: url) else {
+                throw HookInstallerError.nativeConfigUnreadable(
+                    product: .cursor,
+                    path: url.path,
+                    reason: "Could not read existing hooks.json"
+                )
+            }
+            guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            else {
+                throw HookInstallerError.nativeConfigUnreadable(
+                    product: .cursor,
+                    path: url.path,
+                    reason: "Existing hooks.json is not a JSON object; refusing to overwrite"
+                )
+            }
+            // hooks must be absent (we create it) or an object/map — not an array/string.
+            if let hooksValue = obj["hooks"], !(hooksValue is [String: Any]) {
+                throw HookInstallerError.nativeConfigUnreadable(
+                    product: .cursor,
+                    path: url.path,
+                    reason: "Existing hooks.json has a non-object \"hooks\" value; refusing to overwrite"
+                )
+            }
+            root = obj
+        }
+
+        if root["version"] == nil {
+            root["version"] = 1
+        }
+        root[Self.managedKey] = true
+
+        var hooks = root["hooks"] as? [String: Any] ?? [:]
+        for event in Self.cursorLifecycleEvents {
+            var list = hooks[event] as? [[String: Any]] ?? []
+            list.removeAll { entryContainsForwarder($0) && cursorEntryIsManaged($0) }
+            list.append([
+                "command": command,
+                "timeout": 8,
+                Self.managedKey: true,
+            ])
+            hooks[event] = list
+        }
+        root["hooks"] = hooks
+
+        if !dryRun {
+            let out = try JSONSerialization.data(
+                withJSONObject: root,
+                options: [.prettyPrinted, .sortedKeys]
+            )
+            try out.write(to: url, options: [.atomic])
+        }
+
+        return MergeOutcome(
+            message: dryRun
+                ? "Would merge Cursor hooks.json"
+                : "Merged Cursor hooks.json",
+            backupPath: backupPath,
+            nativeConfigPath: url.path
+        )
+    }
+
+    private func unmergeCursorNative() throws -> MergeOutcome {
+        let url = nativeConfigURL(for: .cursor)
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else {
+            return MergeOutcome(
+                message: "No Cursor hooks.json to unmerge",
+                nativeConfigPath: url.path
+            )
+        }
+
+        var backupPath: String?
+        if !dryRun {
+            backupPath = try backupExisting(url: url, product: .cursor, label: "native").path
+        } else {
+            backupPath = "(dry-run backup)"
+        }
+
+        guard let data = try? Data(contentsOf: url),
+              var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              var hooks = root["hooks"] as? [String: Any]
+        else {
+            return MergeOutcome(
+                message: "Cursor hooks.json unreadable; left untouched",
+                backupPath: backupPath,
+                nativeConfigPath: url.path
+            )
+        }
+
+        for event in Array(hooks.keys) {
+            guard var list = hooks[event] as? [[String: Any]] else { continue }
+            list.removeAll { entryContainsForwarder($0) && cursorEntryIsManaged($0) }
+            if list.isEmpty {
+                hooks.removeValue(forKey: event)
+            } else {
+                hooks[event] = list
+            }
+        }
+        root["hooks"] = hooks
+        root.removeValue(forKey: Self.managedKey)
+
+        if !dryRun {
+            let out = try JSONSerialization.data(
+                withJSONObject: root,
+                options: [.prettyPrinted, .sortedKeys]
+            )
+            try out.write(to: url, options: [.atomic])
+        }
+
+        return MergeOutcome(
+            message: dryRun ? "Would unmerge Cursor hooks" : "Unmerged Cursor hooks",
+            backupPath: backupPath,
+            nativeConfigPath: url.path
+        )
+    }
+
+    private func cursorEntryIsManaged(_ entry: [String: Any]) -> Bool {
+        if entry[Self.managedKey] as? Bool == true { return true }
+        if let command = entry["command"] as? String {
+            return command.contains(Self.cursorWrapSourceFlag)
+        }
         return false
+    }
+
+    /// Fail-open JS plugin that maps OpenCode events → EventEnvelope NDJSON on the socket.
+    ///
+    /// Template: ``OpenCodeBridge.plugin.js`` (v3: ``permission.ask`` + ``serverUrl`` + correct SDK name).
+    /// Throws when the template cannot be loaded — never writes an empty no-op plugin.
+    public func openCodePluginSource() throws -> String {
+        let socket = socketPath.path
+        let socketJSON: String = {
+            if let data = try? JSONSerialization.data(
+                withJSONObject: socket,
+                options: [.fragmentsAllowed]
+            ),
+               var quoted = String(data: data, encoding: .utf8)
+            {
+                quoted = quoted.replacingOccurrences(of: "\\/", with: "/")
+                return quoted
+            }
+            return "\"\(Self.escapeJSONStringContents(socket))\""
+        }()
+
+        guard let template = Self.loadOpenCodePluginTemplate() else {
+            throw HookInstallerError.missingOpenCodePluginTemplate
+        }
+        // Template uses SOCKET_PATH = "__NOCTURNAL_SOCKET__" as a quoted placeholder.
+        return template.replacingOccurrences(
+            of: "\"__NOCTURNAL_SOCKET__\"",
+            with: socketJSON
+        )
+    }
+
+    /// Load OpenCodeBridge.plugin.js from the SPM resource bundle, source tree, or app Resources.
+    private static func loadOpenCodePluginTemplate() -> String? {
+        var candidates: [URL] = []
+        // Packaged / SPM: Bundle.module ships the template with NocturnalCore.
+        if let bundled = Bundle.module.url(
+            forResource: "OpenCodeBridge.plugin",
+            withExtension: "js"
+        ) {
+            candidates.append(bundled)
+        }
+        let thisFile = URL(fileURLWithPath: #filePath)
+        candidates.append(
+            thisFile.deletingLastPathComponent().appendingPathComponent("OpenCodeBridge.plugin.js")
+        )
+        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        candidates.append(
+            cwd.appendingPathComponent("Sources/NocturnalCore/Hooks/OpenCodeBridge.plugin.js")
+        )
+        if let res = Bundle.main.resourceURL {
+            candidates.append(res.appendingPathComponent("OpenCodeBridge.plugin.js"))
+        }
+        for url in candidates {
+            if let text = try? String(contentsOf: url, encoding: .utf8),
+               text.contains("nocturnal-opencode-bridge"),
+               !text.contains("v3-fallback")
+            {
+                return text
+            }
+        }
+        return nil
+    }
+
+    private func migrateCodexRoot(_ object: [String: Any]) throws -> [String: Any] {
+        if object["hooks"] is [String: Any] {
+            return object
+        }
+
+        // Migrate Nocturnal's obsolete v1 array without carrying forbidden
+        // top-level marker/version keys into Codex's strict schema.
+        if let oldHooks = object["hooks"] as? [Any] {
+            var migrated: [String: Any] = [:]
+            for entry in oldHooks {
+                guard let old = entry as? [String: Any] else {
+                    throw HookInstallerError.invalidCodexHooks(
+                        "obsolete hooks array contains an entry whose lifecycle cannot be preserved"
+                    )
+                }
+                if entryContainsForwarder(old) { continue }
+                guard let command = old["command"] as? String,
+                      let events = old["events"] as? [String],
+                      !events.isEmpty
+                else {
+                    throw HookInstallerError.invalidCodexHooks(
+                        "obsolete foreign hook is missing command/events; no rewrite performed"
+                    )
+                }
+                for event in events {
+                    var groups = migrated[event] as? [[String: Any]] ?? []
+                    groups.append(["hooks": [["type": "command", "command": command]]])
+                    migrated[event] = groups
+                }
+            }
+            var root: [String: Any] = ["hooks": migrated]
+            if let description = object["description"] as? String {
+                root["description"] = description
+            }
+            return root
+        }
+
+        throw HookInstallerError.invalidCodexHooks(
+            "hooks must be an event-keyed object; no rewrite performed"
+        )
+    }
+
+    private func removingManagedCodexHandlers(from group: [String: Any]) -> [String: Any]? {
+        guard let handlers = group["hooks"] as? [[String: Any]] else {
+            // Preserve malformed/unknown foreign groups for Doctor to report.
+            return group
+        }
+        var keptGroup = group
+        let kept = handlers.filter { !entryContainsForwarder($0) }
+        guard !kept.isEmpty else { return nil }
+        keptGroup["hooks"] = kept
+        return keptGroup
+    }
+
+    private func nativeHookHealth(product: HookProduct) -> (healthy: Bool, message: String) {
+        let native = nativeConfigURL(for: product)
+        guard FileManager.default.fileExists(atPath: native.path) else {
+            return (false, "native config missing")
+        }
+
+        if product == .opencode {
+            guard let text = try? String(contentsOf: native, encoding: .utf8) else {
+                return (false, "OpenCode plugin unreadable")
+            }
+            let managed = text.contains(Self.openCodePluginMarker)
+                || text.contains(Self.managedMarkerBegin)
+            guard managed else {
+                return (false, "OpenCode plugin missing Nocturnal marker")
+            }
+            let path = socketPath.path
+            let socketOk = text.contains(path)
+                || text.contains(path.replacingOccurrences(of: "/", with: "\\/"))
+                || text.contains(Self.escapeJSONStringContents(path))
+            guard socketOk else {
+                return (false, "OpenCode plugin socket path mismatch")
+            }
+            return (true, "OpenCode plugin bridge healthy")
+        }
+
+        if product == .grok {
+            guard let data = try? Data(contentsOf: native),
+                  (try? JSONSerialization.jsonObject(with: data)) is [String: Any],
+                  let text = String(data: data, encoding: .utf8)
+            else {
+                return (false, "Grok hooks file is invalid JSON")
+            }
+            let managed = text.contains(Self.managedCommandMarker)
+                && text.contains(Self.grokWrapSourceFlag)
+            guard managed else {
+                return (false, "Grok hooks missing Nocturnal forwarder")
+            }
+            let path = socketPath.path
+            let socketOk = text.contains(path)
+                || text.contains(path.replacingOccurrences(of: "/", with: "\\/"))
+                || text.contains(Self.escapeJSONStringContents(path))
+            guard socketOk else {
+                return (false, "Grok hooks socket path mismatch")
+            }
+            for event in Self.grokLifecycleEvents {
+                guard text.contains("\"\(event)\"") else {
+                    return (false, "Grok hooks missing \(event)")
+                }
+            }
+            return (true, "Grok Build hooks healthy")
+        }
+
+        if product == .cursor {
+            guard let data = try? Data(contentsOf: native),
+                  (try? JSONSerialization.jsonObject(with: data)) is [String: Any],
+                  let text = String(data: data, encoding: .utf8)
+            else {
+                return (false, "Cursor hooks.json is invalid JSON")
+            }
+            let managed = text.contains(Self.managedCommandMarker)
+                && text.contains(Self.cursorWrapSourceFlag)
+            guard managed else {
+                return (false, "Cursor hooks missing Nocturnal forwarder")
+            }
+            let path = socketPath.path
+            let socketOk = text.contains(path)
+                || text.contains(path.replacingOccurrences(of: "/", with: "\\/"))
+                || text.contains(Self.escapeJSONStringContents(path))
+            guard socketOk else {
+                return (false, "Cursor hooks socket path mismatch")
+            }
+            for event in ["sessionStart", "preToolUse", "postToolUse", "stop"] {
+                guard text.contains("\"\(event)\"") else {
+                    return (false, "Cursor hooks missing \(event)")
+                }
+            }
+            return (true, "Cursor Agent hooks healthy")
+        }
+
+        guard let data = try? Data(contentsOf: native),
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else {
+            return (false, "native config is invalid JSON")
+        }
+
+        if product == .claude {
+            let present = (try? String(contentsOf: native, encoding: .utf8))?
+                .contains(Self.managedCommandMarker) == true
+            return (present, present ? "native hook connected" : "native hook missing Nocturnal")
+        }
+
+        let unknownTopLevel = Set(root.keys).subtracting(["description", "hooks"])
+        guard unknownTopLevel.isEmpty else {
+            return (false, "Codex rejects top-level keys: \(unknownTopLevel.sorted().joined(separator: ", "))")
+        }
+        guard let hooks = root["hooks"] as? [String: Any] else {
+            return (false, "Codex hooks must be an event-keyed object (obsolete array detected)")
+        }
+        for event in Self.codexLifecycleEvents {
+            guard let groups = hooks[event] as? [[String: Any]] else {
+                return (false, "missing Codex lifecycle hook \(event)")
+            }
+            let managedCount = groups.reduce(into: 0) { count, group in
+                guard let handlers = group["hooks"] as? [[String: Any]] else { return }
+                count += handlers.filter { handler in
+                    handler["type"] as? String == "command"
+                        && (handler["command"] as? String)?.contains(Self.managedCommandMarker) == true
+                        && (handler["command"] as? String)?.contains("--wrap-source codex") == true
+                }.count
+            }
+            guard managedCount == 1 else {
+                return (false, "\(event) has \(managedCount) Nocturnal handlers; expected 1")
+            }
+        }
+        return (true, "native Codex lifecycle hooks healthy (0.144.1 schema)")
+    }
+
+    private func jsonObjectsEqual(_ lhs: [String: Any], _ rhs: [String: Any]) -> Bool {
+        guard let left = try? JSONSerialization.data(withJSONObject: lhs, options: [.sortedKeys]),
+              let right = try? JSONSerialization.data(withJSONObject: rhs, options: [.sortedKeys])
+        else { return false }
+        return left == right
     }
 
     // MARK: - Shared
@@ -620,6 +1382,10 @@ public struct HookInstaller: Sendable {
         return "NOCTURNAL_SOCKET=\(socket) \(binary)"
     }
 
+    public func codexForwarderCommand() -> String {
+        forwarderCommand() + " --wrap-source codex --timeout 0.35"
+    }
+
     /// Minimal hook command config pointing at the forwarder.
     /// Real Codex/Claude integration details are documented in HOOK_SCHEMAS.md;
     /// this file is a Nocturnal-managed sidecar the setup CLI owns.
@@ -639,7 +1405,7 @@ public struct HookInstaller: Sendable {
           "socket": "\(socketEscaped)",
           "command": "\(escaped)",
           "events": \(implementedEventsJSON(for: product)),
-          "notes": "Nocturnal-managed sidecar. Use --mode merge-native to also patch product configs."
+          "notes": "Nocturnal-managed descriptor. Agents consume their native hook configuration."
         }
         """
     }
@@ -651,8 +1417,31 @@ public struct HookInstaller: Sendable {
             events = CodexEventDecoder.implementedEventTypes.sorted()
         case .claude:
             events = ClaudeEventDecoder.implementedEventTypes.sorted()
+        case .opencode:
+            events = OpenCodeEventDecoder.implementedEventTypes.sorted()
+        case .grok:
+            events = GrokEventDecoder.implementedEventTypes.sorted()
+        case .cursor:
+            events = CursorEventDecoder.implementedEventTypes.sorted()
         }
         let quoted = events.map { "\"\($0)\"" }.joined(separator: ", ")
         return "[\(quoted)]"
+    }
+}
+
+public enum HookInstallerError: Error, Sendable, Equatable, LocalizedError {
+    case invalidCodexHooks(String)
+    case missingOpenCodePluginTemplate
+    case nativeConfigUnreadable(product: HookProduct, path: String, reason: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidCodexHooks(let detail):
+            return "Cannot safely repair Codex hooks: \(detail)"
+        case .missingOpenCodePluginTemplate:
+            return "OpenCode plugin template missing from NocturnalCore resources (OpenCodeBridge.plugin.js)"
+        case .nativeConfigUnreadable(let product, let path, let reason):
+            return "Cannot install \(product.rawValue) hooks at \(path): \(reason)"
+        }
     }
 }

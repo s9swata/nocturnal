@@ -63,9 +63,9 @@ public enum SetupCLIParseError: Error, Sendable, Equatable, CustomStringConverti
     public var description: String {
         switch self {
         case .missingProductValue:
-            return "missing value for --product (expected codex|claude|all)"
+            return "missing value for --product (expected codex|claude|opencode|grok|cursor|all)"
         case .unknownProduct(let raw):
-            return "unknown product: \(raw) (expected codex|claude|all)"
+            return "unknown product: \(raw) (expected codex|claude|opencode|grok|cursor|all)"
         case .missingForwarderValue:
             return "missing value for --forwarder (expected path to nocturnal-hook-forwarder)"
         case .missingModeValue:
@@ -87,7 +87,7 @@ public struct SetupCLIOptions: Sendable, Equatable {
     public init(
         products: [HookProduct] = HookProduct.allCases,
         forwarderPath: URL? = nil,
-        mode: HookInstallMode = .sidecar,
+        mode: HookInstallMode = .mergeNative,
         dryRun: Bool = false
     ) {
         self.products = products
@@ -117,6 +117,12 @@ public struct SetupCLIOptions: Sendable, Equatable {
                 options.products = [.codex]
             case "claude":
                 options.products = [.claude]
+            case "opencode", "open-code", "open_code":
+                options.products = [.opencode]
+            case "grok", "grok-build", "grokbuild", "grok_build":
+                options.products = [.grok]
+            case "cursor", "cursor-agent", "cursor_agent":
+                options.products = [.cursor]
             default:
                 throw SetupCLIParseError.unknownProduct(raw)
             }
@@ -133,7 +139,7 @@ public struct SetupCLIOptions: Sendable, Equatable {
 
         switch CLIArgumentParser.value(for: "--mode", in: args) {
         case .absent:
-            options.mode = .sidecar
+            options.mode = .mergeNative
         case .missingValue:
             throw SetupCLIParseError.missingModeValue
         case .value(let raw):
@@ -173,6 +179,8 @@ public struct HookForwarderCLIOptions: Sendable, Equatable {
     public var wrapSource: AgentSource?
     public var sessionId: String?
     public var timeout: TimeInterval
+    /// Optional UI wait for PermissionRequest (seconds).
+    public var decisionTimeout: TimeInterval?
     public var helpRequested: Bool
     public var warnings: [String]
 
@@ -181,6 +189,7 @@ public struct HookForwarderCLIOptions: Sendable, Equatable {
         wrapSource: AgentSource? = nil,
         sessionId: String? = nil,
         timeout: TimeInterval = HookForwarderCLIOptions.defaultTimeout,
+        decisionTimeout: TimeInterval? = nil,
         helpRequested: Bool = false,
         warnings: [String] = []
     ) {
@@ -188,6 +197,7 @@ public struct HookForwarderCLIOptions: Sendable, Equatable {
         self.wrapSource = wrapSource
         self.sessionId = sessionId
         self.timeout = timeout
+        self.decisionTimeout = decisionTimeout
         self.helpRequested = helpRequested
         self.warnings = warnings
     }
@@ -211,13 +221,12 @@ public struct HookForwarderCLIOptions: Sendable, Equatable {
         case .missingValue:
             options.warnings.append("missing value for --wrap-source; not wrapping")
         case .value(let raw):
-            switch raw.lowercased() {
-            case "codex":
-                options.wrapSource = .codex
-            case "claude":
-                options.wrapSource = .claude
-            default:
-                options.warnings.append("unknown wrap-source \(raw) (use codex|claude)")
+            let source = AgentSource(parsing: raw)
+            options.wrapSource = source
+            if source == .unknown {
+                options.warnings.append(
+                    "unrecognized wrap-source \(raw); wrapping as unknown (use codex|claude|opencode|grok-build|…)"
+                )
             }
         }
 
@@ -237,6 +246,19 @@ public struct HookForwarderCLIOptions: Sendable, Equatable {
             options.warnings.append("missing value for --timeout; using default \(defaultTimeout)s")
         case .value(let raw):
             options.timeout = sanitizeTimeout(raw, warnings: &options.warnings)
+        }
+
+        switch CLIArgumentParser.value(for: "--decision-timeout", in: args) {
+        case .absent:
+            break
+        case .missingValue:
+            options.warnings.append("missing value for --decision-timeout; using default")
+        case .value(let raw):
+            if let value = TimeInterval(raw), value.isFinite, value > 0 {
+                options.decisionTimeout = min(value, HookForwarderOptions.maxDecisionTimeout)
+            } else {
+                options.warnings.append("invalid --decision-timeout \(raw); ignoring")
+            }
         }
 
         return options

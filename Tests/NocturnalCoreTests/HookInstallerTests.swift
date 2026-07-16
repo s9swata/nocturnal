@@ -102,6 +102,24 @@ struct HookInstallerTests {
         #expect(installer.socketPath.path == temp.appendingPathComponent("ipc.sock").path)
     }
 
+    @Test func resolveHonorsCodexHomeWithoutAffectingClaudeHome() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-hooks-codex-home")
+        defer { cleanup() }
+        let home = temp.appendingPathComponent("home", isDirectory: true)
+        let codexHome = temp.appendingPathComponent("custom-codex", isDirectory: true)
+        let appSupport = temp.appendingPathComponent("support", isDirectory: true)
+        let installer = try HookInstaller.resolve(
+            forwarderBinaryPath: URL(fileURLWithPath: "/tmp/fwd"),
+            environment: [
+                "HOME": home.path,
+                "CODEX_HOME": codexHome.path,
+                NocturnalEnvironmentKey.appSupport.rawValue: appSupport.path,
+            ]
+        )
+        #expect(installer.nativeConfigURL(for: .codex).path == codexHome.appendingPathComponent("hooks.json").path)
+        #expect(installer.nativeConfigURL(for: .claude).path == home.appendingPathComponent(".claude/settings.json").path)
+    }
+
     @Test func sidecarJSONMentionsForwarder() throws {
         let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-hooks-json")
         defer { cleanup() }
@@ -188,7 +206,7 @@ struct HookInstallerTests {
         #expect(escaped.contains("\\\\"))
     }
 
-    @Test func mergeNativeBacksUpMalformedCodexHooksJSON() throws {
+    @Test func mergeNativeBacksUpAndRefusesMalformedCodexHooksJSON() throws {
         let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-hooks-malformed")
         defer { cleanup() }
 
@@ -205,21 +223,17 @@ struct HookInstallerTests {
         try FileManager.default.createDirectory(at: native.deletingLastPathComponent(), withIntermediateDirectories: true)
         try "this is not json {{{".write(to: native, atomically: true, encoding: .utf8)
 
-        let result = try installer.install(product: .codex)
-        #expect(result.succeeded)
-        #expect(result.backupPath != nil)
-
-        let backup = try #require(result.backupPath)
-        #expect(FileManager.default.fileExists(atPath: backup))
-        let backupBody = try String(contentsOfFile: backup, encoding: .utf8)
+        #expect(throws: HookInstallerError.self) {
+            _ = try installer.install(product: .codex)
+        }
+        let files = try FileManager.default.contentsOfDirectory(at: backups, includingPropertiesForKeys: nil)
+        let backup = try #require(files.first { $0.lastPathComponent.contains("codex-native") })
+        let backupBody = try String(contentsOf: backup, encoding: .utf8)
         #expect(backupBody.contains("this is not json"))
-
-        let rewritten = try String(contentsOf: native, encoding: .utf8)
-        #expect(rewritten.contains(HookInstaller.managedCommandMarker))
-        #expect(rewritten.contains(HookInstaller.managedKey))
+        #expect(try String(contentsOf: native, encoding: .utf8) == "this is not json {{{")
     }
 
-    @Test func mergeNativePreservesStringFormatCodexHooks() throws {
+    @Test func mergeNativePreservesForeignCurrentSchemaAndIsIdempotent() throws {
         let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-hooks-strings")
         defer { cleanup() }
 
@@ -235,10 +249,13 @@ struct HookInstallerTests {
         let native = installer.nativeConfigURL(for: .codex)
         try FileManager.default.createDirectory(at: native.deletingLastPathComponent(), withIntermediateDirectories: true)
         let existing: [String: Any] = [
+            "description": "user hooks",
             "hooks": [
-                "echo user-hook",
-                ["command": "other-tool --flag", "events": ["session.started"]],
-            ] as [Any],
+                "SessionStart": [[
+                    "matcher": "startup",
+                    "hooks": [["type": "command", "command": "other-tool --flag"]],
+                ]],
+            ],
         ]
         let existingData = try JSONSerialization.data(withJSONObject: existing, options: [.prettyPrinted])
         try existingData.write(to: native)
@@ -249,18 +266,66 @@ struct HookInstallerTests {
 
         let data = try Data(contentsOf: native)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        let hooks = try #require(json["hooks"] as? [Any])
-
-        let stringHooks = hooks.compactMap { $0 as? String }
-        #expect(stringHooks.contains("echo user-hook"))
-
-        let objectCommands = hooks.compactMap { entry -> String? in
-            (entry as? [String: Any])?["command"] as? String
+        #expect(json["description"] as? String == "user hooks")
+        let hooks = try #require(json["hooks"] as? [String: Any])
+        let sessionStart = try #require(hooks["SessionStart"] as? [[String: Any]])
+        let commands = sessionStart.flatMap { group in
+            (group["hooks"] as? [[String: Any]] ?? []).compactMap { $0["command"] as? String }
         }
-        #expect(objectCommands.contains("other-tool --flag"))
-        #expect(objectCommands.contains { $0.contains(HookInstaller.managedCommandMarker) })
-        // User string entry must not have been dropped by object-only merge.
-        #expect(hooks.count >= 3)
+        #expect(commands.contains("other-tool --flag"))
+        #expect(commands.filter { $0.contains(HookInstaller.managedCommandMarker) }.count == 1)
+
+        _ = try installer.install(product: .codex)
+        let secondData = try Data(contentsOf: native)
+        let secondJSON = try #require(JSONSerialization.jsonObject(with: secondData) as? [String: Any])
+        let secondHooks = try #require(secondJSON["hooks"] as? [String: Any])
+        for event in HookInstaller.codexLifecycleEvents {
+            let groups = try #require(secondHooks[event] as? [[String: Any]])
+            let count = groups.flatMap { $0["hooks"] as? [[String: Any]] ?? [] }
+                .compactMap { $0["command"] as? String }
+                .filter { $0.contains(HookInstaller.managedCommandMarker) }
+                .count
+            #expect(count == 1)
+        }
+        #expect(Set(secondJSON.keys).isSubset(of: ["description", "hooks"]))
+    }
+
+    @Test func repairMigratesObsoleteNocturnalCodexArray() throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-hooks-migrate")
+        defer { cleanup() }
+        let installer = HookInstaller(
+            configRoot: temp,
+            forwarderBinaryPath: URL(fileURLWithPath: "/tmp/nocturnal-hook-forwarder"),
+            socketPath: URL(fileURLWithPath: "/tmp/nocturnal.sock"),
+            backupsDirectory: temp.appendingPathComponent("backups", isDirectory: true)
+        )
+        let native = installer.nativeConfigURL(for: .codex)
+        try FileManager.default.createDirectory(at: native.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let obsolete: [String: Any] = [
+            "version": 1,
+            HookInstaller.managedKey: true,
+            "hooks": [[
+                "command": "'/tmp/nocturnal-hook-forwarder'",
+                "events": ["session.started"],
+                HookInstaller.managedKey: true,
+            ]],
+        ]
+        try JSONSerialization.data(withJSONObject: obsolete).write(to: native)
+
+        let before = installer.doctor(product: .codex)
+        #expect(!before.succeeded)
+        let repaired = try installer.repair(product: .codex)
+        #expect(repaired.succeeded)
+        let after = installer.doctor(product: .codex)
+        #expect(after.succeeded)
+
+        let root = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: native)) as? [String: Any]
+        )
+        #expect(Set(root.keys).isSubset(of: ["description", "hooks"]))
+        #expect(root["hooks"] is [String: Any])
+        let body = try String(contentsOf: native, encoding: .utf8)
+        #expect(body.contains("--wrap-source codex"))
     }
 
     /// Default (sidecar) mode backs up an invalid existing sidecar before overwrite.

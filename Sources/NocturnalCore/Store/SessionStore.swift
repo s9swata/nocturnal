@@ -101,9 +101,19 @@ public actor SessionStore {
         } catch {
             return 0
         }
+        let now = Date()
         var merged = 0
-        for session in loaded {
+        for var session in loaded {
+            // Always repair OpenCode mislabels + stuck running on load.
+            let repaired = OpenCodeSessionIdentity.repair(&session, now: now)
             if let existing = sessionsByID[session.id], existing.updatedAt >= session.updatedAt {
+                // Disk not newer — still repair the live copy (source / zombie idle).
+                if var live = sessionsByID[session.id] {
+                    if OpenCodeSessionIdentity.repair(&live, now: now) {
+                        sessionsByID[session.id] = live
+                        try? await store.save(live)
+                    }
+                }
                 continue
             }
             sessionsByID[session.id] = session
@@ -111,6 +121,18 @@ public actor SessionStore {
                 order.append(session.id)
             }
             merged += 1
+            // Always rewrite repaired rows so next launch stays clean.
+            if repaired {
+                try? await store.save(session)
+            }
+        }
+        // Second pass: repair every in-memory session (covers order-only / edge cases).
+        for id in order {
+            guard var live = sessionsByID[id] else { continue }
+            if OpenCodeSessionIdentity.repair(&live, now: now) {
+                sessionsByID[id] = live
+                try? await store.save(live)
+            }
         }
         // Keep most-recently updated first.
         order.sort { lhs, rhs in
@@ -118,9 +140,29 @@ public actor SessionStore {
             let r = sessionsByID[rhs]?.updatedAt ?? .distantPast
             return l > r
         }
-        pruneToPolicy(now: Date())
+        pruneToPolicy(now: now)
         bumpAndPublish()
         return merged
+    }
+
+    /// Force re-repair of every session (e.g. after upgrade). Persists changes.
+    @discardableResult
+    public func repairAllOpenCodeSessions(now: Date = Date()) async -> Int {
+        var fixed = 0
+        for id in order {
+            guard var session = sessionsByID[id] else { continue }
+            if OpenCodeSessionIdentity.repair(&session, now: now) {
+                sessionsByID[id] = session
+                fixed += 1
+                if let persistence {
+                    try? await persistence.save(session)
+                }
+            }
+        }
+        if fixed > 0 {
+            bumpAndPublish()
+        }
+        return fixed
     }
 
     // MARK: - Reads
@@ -162,22 +204,64 @@ public actor SessionStore {
     /// still merge when useful, but lifecycle state is left alone.
     @discardableResult
     public func apply(_ envelope: EventEnvelope) async -> Session {
-        let decoded = decoder.decode(envelope)
+        var decoded = decoder.decode(envelope)
+        // NAP attention: normalize before product-specific gaps leave approvals as
+        // generic activity. Also clear pending UI for native resolution aliases.
+        let nap = CanonicalAgentEvent.normalize(envelope.eventType)
+        let payload = decoded.activityPayload ?? envelope.payload
+        if nap == CanonicalAgentEvent.permissionAsked.rawValue, decoded.approval == nil {
+            decoded.approval = Self.synthesizeApproval(
+                from: payload,
+                sessionId: envelope.sessionId,
+                envelopeId: envelope.id,
+                at: envelope.timestamp
+            )
+            decoded.state = .waitingForApproval
+            decoded.isUnknown = false
+        }
+        if nap == CanonicalAgentEvent.questionAsked.rawValue, decoded.question == nil {
+            decoded.question = Self.synthesizeQuestion(
+                from: payload,
+                sessionId: envelope.sessionId,
+                envelopeId: envelope.id,
+                at: envelope.timestamp
+            )
+            decoded.state = .waitingForInput
+            decoded.isUnknown = false
+        }
+        if nap == CanonicalAgentEvent.permissionResolved.rawValue {
+            decoded.clearApproval = true
+            if decoded.resolvedApprovalId == nil {
+                // Same order as ``synthesizeApproval`` so NAP create/clear match.
+                decoded.resolvedApprovalId = Self.approvalCorrelationId(from: payload)
+            }
+        }
+        if nap == CanonicalAgentEvent.questionAnswered.rawValue {
+            decoded.clearQuestion = true
+            if decoded.resolvedQuestionId == nil {
+                // Same order as ``synthesizeQuestion`` so NAP create/clear match.
+                decoded.resolvedQuestionId = Self.questionCorrelationId(from: payload)
+            }
+        }
         if decoded.isUnknown {
             unknownEventCount &+= 1
         }
 
         let sessionID = SessionID(envelope.sessionId)
-        let source: AgentSource = {
-            if envelope.source != .unknown { return envelope.source }
-            return decoded.inferredSource
-        }()
+        let titleHint = decoded.titleHint
+        // OpenCode ses_* / "New session - ISO" never become Claude via PascalCase inference.
+        let source = OpenCodeSessionIdentity.resolveSource(
+            sessionId: envelope.sessionId,
+            title: titleHint,
+            wireSource: envelope.source,
+            inferredSource: decoded.inferredSource
+        )
 
         var session = sessionsByID[sessionID] ?? Session(
             id: sessionID,
             source: source,
             state: .idle,
-            title: decoded.titleHint ?? "",
+            title: titleHint ?? "",
             createdAt: envelope.timestamp,
             updatedAt: envelope.timestamp
         )
@@ -188,17 +272,43 @@ public actor SessionStore {
         // Older events must not rewind or revive terminal / newer sessions.
         let allowLifecycleMutation = !isStaleEvent && !(isTerminal && envelope.timestamp <= session.updatedAt)
 
-        // Prefer a known source over unknown when we learn more.
-        if session.source == .unknown, source != .unknown {
+        // Identity: OpenCode heuristics win; otherwise prefer wire then first known.
+        if OpenCodeSessionIdentity.looksLikeOpenCode(
+            sessionId: session.id.rawValue,
+            title: titleHint ?? session.title,
+            source: source
+        ) {
+            session.source = .opencode
+        } else if envelope.source != .unknown {
+            session.source = envelope.source
+        } else if session.source == .unknown, source != .unknown {
             session.source = source
         }
 
-        if let title = decoded.titleHint, !title.isEmpty {
+        if let title = titleHint, !title.isEmpty {
             session.title = title
+            // Title can prove OpenCode after the fact (mislabel repair).
+            if OpenCodeSessionIdentity.isOpenCodeTitle(title) {
+                session.source = .opencode
+            }
         }
+        // Offline recovery is metadata-only for sessions that already have live
+        // activity / attention — never demote a live OpenCode approval or running
+        // session because a disk timestamp is newer than the last socket event.
+        let isReconcileOnly = envelope.eventType == "session.reconciled"
+        let protectLiveFromReconcile = isReconcileOnly && isExisting && (
+            session.state.needsAttention
+                || session.state == .running
+                || session.pendingApproval != nil
+                || session.pendingQuestion != nil
+                || session.currentActivity?.isActive == true
+                || !session.isRecoveryStub
+        )
+
         if let summary = decoded.summaryHint, allowLifecycleMutation || !isTerminal {
             // Allow summary refresh on non-lifecycle stale events only when not terminal revival.
-            if allowLifecycleMutation || !isStaleEvent {
+            // Never overwrite a live session's summary with recovery copy.
+            if !protectLiveFromReconcile, allowLifecycleMutation || !isStaleEvent {
                 session.summary = summary
             }
         }
@@ -208,8 +318,21 @@ public actor SessionStore {
             jump.workingDirectory = cwd
             session.jumpBack = jump
         }
+        // Capture local transcript path for optional detail enrichment.
+        if let path = EventDecodeHelpers.string(
+            envelope.payload,
+            "transcript_path",
+            "transcriptPath",
+            "rollout_path"
+        ) ?? EventDecodeHelpers.string(
+            envelope.raw,
+            "transcript_path",
+            "transcriptPath"
+        ) {
+            session.transcriptPath = path
+        }
 
-        if allowLifecycleMutation {
+        if allowLifecycleMutation, !protectLiveFromReconcile {
             if let state = decoded.state {
                 session.state = state
             }
@@ -222,15 +345,33 @@ public actor SessionStore {
                 session.state = .waitingForInput
             }
             if decoded.clearApproval {
-                session.pendingApproval = nil
-                if session.state == .waitingForApproval {
-                    session.state = decoded.state ?? .running
+                // Require correlation: missing ID is not a match (stale OpenCode
+                // permission.replied without id must not clear a newer pending ask).
+                let matches: Bool = {
+                    guard let rid = decoded.resolvedApprovalId, !rid.isEmpty else {
+                        return false
+                    }
+                    return session.pendingApproval?.id == rid
+                }()
+                if matches {
+                    session.pendingApproval = nil
+                    if session.state == .waitingForApproval {
+                        session.state = decoded.state ?? .running
+                    }
                 }
             }
             if decoded.clearQuestion {
-                session.pendingQuestion = nil
-                if session.state == .waitingForInput {
-                    session.state = decoded.state ?? .running
+                let matches: Bool = {
+                    guard let rid = decoded.resolvedQuestionId, !rid.isEmpty else {
+                        return false
+                    }
+                    return session.pendingQuestion?.id == rid
+                }()
+                if matches {
+                    session.pendingQuestion = nil
+                    if session.state == .waitingForInput {
+                        session.state = decoded.state ?? .running
+                    }
                 }
             }
         }
@@ -260,7 +401,11 @@ public actor SessionStore {
             session.rawMetadata["sourceRaw"] = .string(sourceRaw)
         }
 
-        session.lastEventType = envelope.eventType
+        // Stale envelopes must not replace recovery / live lastEventType — otherwise
+        // a delayed hook can clear isRecoveryStub on a recovered row.
+        if !isStaleEvent {
+            session.lastEventType = envelope.eventType
+        }
         // Never move updatedAt backwards.
         if envelope.timestamp >= session.updatedAt {
             session.updatedAt = envelope.timestamp
@@ -269,6 +414,16 @@ public actor SessionStore {
         if session.recentEventIDs.count > recentEventLimit {
             session.recentEventIDs.removeFirst(session.recentEventIDs.count - recentEventLimit)
         }
+
+        SessionActivityMapping.apply(
+            to: &session,
+            envelope: envelope,
+            decoded: decoded,
+            allowLifecycleMutation: allowLifecycleMutation
+        )
+
+        // Demote OpenCode start-shell zombies; repair any residual mislabel.
+        OpenCodeSessionIdentity.repair(&session)
 
         // Stale events may merge metadata but must not reorder the session list.
         await upsert(session, persist: true, promoteToFront: !isStaleEvent)
@@ -284,14 +439,49 @@ public actor SessionStore {
         switch response {
         case .approval(let decision):
             guard var session = sessionsByID[decision.sessionId] else { return nil }
-            guard session.pendingApproval?.id == decision.requestId else {
+            guard let pending = session.pendingApproval, pending.id == decision.requestId else {
                 // Mismatched id — leave state untouched.
                 return session
             }
+            // Sticky always-allow: record tool from pending request before clearing.
+            if decision.approved, decision.resolvedScope == .sessionTool {
+                let key = Session.normalizedToolName(pending.toolName)
+                if !key.isEmpty {
+                    session.sessionAlwaysAllowTools.insert(key)
+                }
+            }
             session.pendingApproval = nil
-            session.state = .running
             session.summary = decision.approved ? "Approved" : "Denied"
             session.updatedAt = decision.decidedAt
+            SessionActivityPolicy.endCurrent(on: &session, at: decision.decidedAt)
+            if decision.approved {
+                // Allow continues work — active turn until next lifecycle event.
+                session.state = .running
+                SessionActivityPolicy.setCurrent(
+                    SessionActivity(
+                        kind: .turn,
+                        label: "Approved",
+                        eventType: "local.approval",
+                        startedAt: decision.decidedAt
+                    ),
+                    on: &session
+                )
+            } else {
+                // Deny finishes the blocked command — do not leave a permanent
+                // active turn (stale-session repair skips live turns).
+                session.state = .idle
+                SessionActivityPolicy.setCurrent(
+                    SessionActivity(
+                        kind: .session,
+                        label: "Denied",
+                        eventType: "local.approval",
+                        startedAt: decision.decidedAt,
+                        endedAt: decision.decidedAt
+                    ),
+                    on: &session
+                )
+                SessionActivityPolicy.endCurrent(on: &session, at: decision.decidedAt)
+            }
             await upsert(session, persist: true, promoteToFront: true)
             return session
         case .question(let answer):
@@ -303,6 +493,16 @@ public actor SessionStore {
             session.state = .running
             session.summary = "Answered"
             session.updatedAt = answer.answeredAt
+            SessionActivityPolicy.endCurrent(on: &session, at: answer.answeredAt)
+            SessionActivityPolicy.setCurrent(
+                SessionActivity(
+                    kind: .turn,
+                    label: "Answered",
+                    eventType: "local.answer",
+                    startedAt: answer.answeredAt
+                ),
+                on: &session
+            )
             await upsert(session, persist: true, promoteToFront: true)
             return session
         }
@@ -310,6 +510,32 @@ public actor SessionStore {
 
     public func upsert(_ session: Session) async {
         await upsert(session, persist: true, promoteToFront: true)
+    }
+
+    /// Attach a local log detail snapshot and merge found tokens/diff into stats.
+    @discardableResult
+    public func applyDetailSnapshot(_ detail: SessionDetailSnapshot) async -> Session? {
+        guard var session = sessionsByID[detail.sessionId] else { return nil }
+        session.detailSnapshot = detail
+        if let path = detail.transcriptPath {
+            session.transcriptPath = path
+        }
+        session.stats.mergeMetrics(
+            tokensIn: detail.tokensIn,
+            tokensOut: detail.tokensOut,
+            diffAdded: detail.diffAdded,
+            diffRemoved: detail.diffRemoved
+        )
+        // Prefer JSONL tool rows when we have more history than hot activities.
+        if !detail.recentToolRows.isEmpty, session.recentActivities.count < detail.recentToolRows.count {
+            let merged = detail.recentToolRows.prefix(SessionActivityPolicy.maxRecent)
+            // Keep existing hook activities first if fresher; else use detail rows.
+            if session.recentActivities.isEmpty {
+                session.recentActivities = Array(merged)
+            }
+        }
+        await upsert(session, persist: true, promoteToFront: false)
+        return session
     }
 
     public func remove(id: SessionID) async {
@@ -466,8 +692,14 @@ public struct DecodedEvent: Sendable, Equatable {
     public var question: QuestionPrompt?
     public var clearApproval: Bool
     public var clearQuestion: Bool
+    /// When set, ``clearApproval`` only applies if it matches ``Session/pendingApproval``.
+    public var resolvedApprovalId: String?
+    /// When set, ``clearQuestion`` only applies if it matches ``Session/pendingQuestion``.
+    public var resolvedQuestionId: String?
     public var jumpBack: JumpBackContext?
     public var extraMetadata: [String: JSONValue]
+    /// Decoder-enriched payload for activity mapping (tool aliases, merged raw keys).
+    public var activityPayload: [String: JSONValue]?
     /// True when the event type is not in the implemented schema set.
     public var isUnknown: Bool
 
@@ -481,8 +713,11 @@ public struct DecodedEvent: Sendable, Equatable {
         question: QuestionPrompt? = nil,
         clearApproval: Bool = false,
         clearQuestion: Bool = false,
+        resolvedApprovalId: String? = nil,
+        resolvedQuestionId: String? = nil,
         jumpBack: JumpBackContext? = nil,
         extraMetadata: [String: JSONValue] = [:],
+        activityPayload: [String: JSONValue]? = nil,
         isUnknown: Bool = false
     ) {
         self.inferredSource = inferredSource
@@ -494,8 +729,72 @@ public struct DecodedEvent: Sendable, Equatable {
         self.question = question
         self.clearApproval = clearApproval
         self.clearQuestion = clearQuestion
+        self.resolvedApprovalId = resolvedApprovalId
+        self.resolvedQuestionId = resolvedQuestionId
         self.jumpBack = jumpBack
         self.extraMetadata = extraMetadata
+        self.activityPayload = activityPayload
         self.isUnknown = isUnknown
+    }
+}
+
+extension SessionStore {
+    /// NAP / generic correlation keys (create + resolve share this order).
+    fileprivate static let approvalCorrelationKeys = [
+        "request_id", "tool_use_id", "toolUseId", "approval_id", "id",
+    ]
+    fileprivate static let questionCorrelationKeys = [
+        "id", "prompt_id", "request_id",
+    ]
+
+    fileprivate static func approvalCorrelationId(from payload: [String: JSONValue]) -> String? {
+        EventDecodeHelpers.string(payload, keys: approvalCorrelationKeys)
+    }
+
+    fileprivate static func questionCorrelationId(from payload: [String: JSONValue]) -> String? {
+        EventDecodeHelpers.string(payload, keys: questionCorrelationKeys)
+    }
+
+    fileprivate static func synthesizeApproval(
+        from payload: [String: JSONValue],
+        sessionId: String,
+        envelopeId: UUID,
+        at: Date
+    ) -> ApprovalRequest {
+        let requestId = approvalCorrelationId(from: payload) ?? envelopeId.uuidString
+        let tool = EventDecodeHelpers.string(payload, "tool_name", "tool", "name") ?? "tool"
+        let summary = EventDecodeHelpers.string(payload, "summary", "description", "message")
+            ?? "Approve \(tool)?"
+        let detail = EventDecodeHelpers.string(payload, "detail", "command", "input")
+        return ApprovalRequest(
+            id: requestId,
+            sessionId: SessionID(sessionId),
+            toolName: tool,
+            summary: summary,
+            detail: detail,
+            createdAt: at,
+            raw: payload
+        )
+    }
+
+    fileprivate static func synthesizeQuestion(
+        from payload: [String: JSONValue],
+        sessionId: String,
+        envelopeId: UUID,
+        at: Date
+    ) -> QuestionPrompt {
+        let promptId = questionCorrelationId(from: payload) ?? envelopeId.uuidString
+        let prompt = EventDecodeHelpers.string(payload, "prompt", "question", "message")
+            ?? "Agent needs input"
+        return QuestionPrompt(
+            id: promptId,
+            sessionId: SessionID(sessionId),
+            prompt: prompt,
+            placeholder: EventDecodeHelpers.string(payload, "placeholder"),
+            choices: EventDecodeHelpers.stringArray(payload["choices"]),
+            allowFreeform: EventDecodeHelpers.bool(payload, "allow_freeform") ?? true,
+            createdAt: at,
+            raw: payload
+        )
     }
 }

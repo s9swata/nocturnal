@@ -1,0 +1,21 @@
+<!-- Nocturnal stage-aware icons. Set data-nocturnal-stage on <html> to production|staging|dev -->
+<link rel="icon" type="image/x-icon" href="/static/icons/production/favicon.ico" id="nocturnal-favicon">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/icons/production/icon-32.png" id="nocturnal-favicon-32">
+<link rel="apple-touch-icon" href="/static/icons/production/apple-touch-icon.png" id="nocturnal-apple-touch">
+<link rel="manifest" href="/static/icons/production/site.webmanifest" id="nocturnal-manifest">
+<script>
+(function () {
+  var stage = (document.documentElement.getAttribute("data-nocturnal-stage")
+    || "production").toLowerCase();
+  if (stage !== "staging" && stage !== "dev") stage = "production";
+  var base = "/static/icons/" + stage + "/";
+  function set(id, attr, val) {
+    var el = document.getElementById(id);
+    if (el) el.setAttribute(attr, val);
+  }
+  set("nocturnal-favicon", "href", base + "favicon.ico");
+  set("nocturnal-favicon-32", "href", base + "icon-32.png");
+  set("nocturnal-apple-touch", "href", base + "apple-touch-icon.png");
+  set("nocturnal-manifest", "href", base + "site.webmanifest");
+})();
+</script>

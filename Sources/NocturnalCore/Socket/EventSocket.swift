@@ -50,6 +50,8 @@ public actor EventSocketServer {
 
     private let path: URL
     private let maxLineBytes: Int
+    /// Shared with AppModel so Approve/Deny can unblock waiting forwarders.
+    private let permissionBroker: PermissionBroker
     private var listener: LocalUnixListener?
     private var clientTasks: [UUID: Task<Void, Never>] = [:]
     /// Open client handles so ``stop()`` can close them and unblock idle reads.
@@ -58,9 +60,18 @@ public actor EventSocketServer {
     private var eventContinuation: AsyncStream<EventEnvelope>.Continuation?
     private var eventStream: AsyncStream<EventEnvelope>?
 
-    public init(path: URL, maxLineBytes: Int = 1_048_576) {
+    public init(
+        path: URL,
+        maxLineBytes: Int = 1_048_576,
+        permissionBroker: PermissionBroker = PermissionBroker()
+    ) {
         self.path = path
         self.maxLineBytes = max(4096, maxLineBytes)
+        self.permissionBroker = permissionBroker
+    }
+
+    public func broker() -> PermissionBroker {
+        permissionBroker
     }
 
     /// Start listening. Yields decoded envelopes on the returned stream.
@@ -89,31 +100,49 @@ public actor EventSocketServer {
         return stream
     }
 
-    public func stop() {
+    public func stop() async {
+        // Tear down *local* state synchronously first so a concurrent `start()`
+        // cannot be undone by post-await cleanup (finished stream / unlinked sock).
         isRunning = false
         acceptTask?.cancel()
         acceptTask = nil
         listener?.close()
         listener = nil
-        // Shutdown then close client fds so off-actor blocking reads unblock promptly.
-        // `close` alone can leave a peer `read` blocked on some Darwin kernels;
-        // `shutdown(SHUT_RDWR)` forces EOF/error on the blocked reader first.
-        for handle in clientHandles.values {
+
+        let handles = clientHandles
+        clientHandles = [:]
+        let tasks = Array(clientTasks.values)
+        clientTasks = [:]
+        let cont = eventContinuation
+        eventContinuation = nil
+        eventStream = nil
+
+        // Unlink before any suspension so a restart can rebind this path.
+        try? FileManager.default.removeItem(at: path)
+
+        // Shutdown then close captured client fds so off-actor blocking reads
+        // unblock. Do not touch `clientHandles` / stream after this point.
+        for handle in handles.values {
             let fd = handle.fileDescriptor
             if fd >= 0 {
                 Darwin.shutdown(fd, SHUT_RDWR)
             }
             try? handle.close()
         }
-        clientHandles.removeAll()
-        for task in clientTasks.values {
+        for task in tasks {
             task.cancel()
         }
-        clientTasks.removeAll()
-        eventContinuation?.finish()
-        eventContinuation = nil
-        eventStream = nil
-        try? FileManager.default.removeItem(at: path)
+        // Wait for reader defer cleanup before returning so a concurrent
+        // start()+accept cannot recycle an fd that a deferred shutdown still
+        // holds (or would re-shutdown after close).
+        for task in tasks {
+            await task.value
+        }
+        cont?.finish()
+
+        // Resume permission waiters last (may suspend). Captured-only teardown
+        // above means this cannot clobber a newly started server.
+        await permissionBroker.cancelAll(with: .deferred)
     }
 
     public func currentDiagnostics() -> EventSocketDiagnostics {
@@ -146,7 +175,12 @@ public actor EventSocketServer {
     }
 
     private func readClient(_ handle: FileHandle, id: UUID) async {
+        // Capture fd once for send/recv (avoid NSFileHandle.fileDescriptor races).
+        let clientFD = handle.fileDescriptor
         defer {
+            if clientFD >= 0 {
+                Darwin.shutdown(clientFD, SHUT_RDWR)
+            }
             try? handle.close()
             clientHandles[id] = nil
             clientTasks[id] = nil
@@ -158,11 +192,9 @@ public actor EventSocketServer {
         let lineLimit = maxLineBytes
 
         while !Task.isCancelled && isRunning {
-            // Blocking read off actor isolation so accept / stop / other clients
-            // remain responsive while this client is idle.
             let chunk: Data?
             do {
-                chunk = try await Self.readChunkOffActor(handle, maxBytes: 8192)
+                chunk = try await Self.readChunkFromFD(clientFD, maxBytes: 8192)
             } catch {
                 if isRunning && !Task.isCancelled {
                     diagnostics.lastError = error.localizedDescription
@@ -175,7 +207,6 @@ public actor EventSocketServer {
 
             buffer.append(data)
             if buffer.count > lineLimit * 2 {
-                // Pathological client: drop buffer, keep listening for next newline.
                 diagnostics.decodeFailures &+= 1
                 diagnostics.lastError = "client buffer exceeded limit"
                 if let nl = buffer.lastIndex(of: 0x0A) {
@@ -201,8 +232,23 @@ public actor EventSocketServer {
                     let envelope = try decoder.decode(EventEnvelope.self, from: line)
                     eventContinuation?.yield(envelope)
                     diagnostics.envelopesYielded &+= 1
+
+                    // Decision-mode: block this client until UI answers (or timeout → defer).
+                    if HookDecisionTranslator.envelopeNeedsDecision(envelope) {
+                        let decisionId = HookDecisionTranslator.decisionRequestId(for: envelope)
+                        let timeout = HookDecisionTranslator.timeoutSeconds(from: envelope)
+                        let result = await permissionBroker.wait(
+                            for: decisionId,
+                            timeoutSeconds: timeout
+                        )
+                        let reply = PermissionDecisionReply(
+                            decisionRequestId: decisionId,
+                            behavior: result.behavior,
+                            message: result.message
+                        )
+                        await Self.writeReplyToFD(clientFD, reply: reply)
+                    }
                 } catch {
-                    // Fail-open: drop bad lines, never crash the server.
                     diagnostics.decodeFailures &+= 1
                     diagnostics.lastError = "decode: \(error.localizedDescription)"
                 }
@@ -210,15 +256,48 @@ public actor EventSocketServer {
         }
     }
 
-    /// Perform a blocking `FileHandle.read` on a utility queue, then hop back.
-    private static func readChunkOffActor(_ handle: FileHandle, maxBytes: Int) async throws -> Data? {
+    private static func writeReplyToFD(_ fd: Int32, reply: PermissionDecisionReply) async {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        guard var data = try? encoder.encode(reply) else { return }
+        data.append(0x0A)
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .utility).async {
+                guard fd >= 0 else {
+                    cont.resume()
+                    return
+                }
+                data.withUnsafeBytes { buffer in
+                    guard let base = buffer.baseAddress else { return }
+                    var sent = 0
+                    let total = buffer.count
+                    while sent < total {
+                        let n = Darwin.send(fd, base.advanced(by: sent), total - sent, 0)
+                        if n <= 0 { break }
+                        sent += n
+                    }
+                }
+                cont.resume()
+            }
+        }
+    }
+
+    private static func readChunkFromFD(_ fd: Int32, maxBytes: Int) async throws -> Data? {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                do {
-                    let data = try handle.read(upToCount: maxBytes)
-                    continuation.resume(returning: data)
-                } catch {
-                    continuation.resume(throwing: error)
+                var buffer = [UInt8](repeating: 0, count: maxBytes)
+                let n = Darwin.recv(fd, &buffer, maxBytes, 0)
+                if n > 0 {
+                    continuation.resume(returning: Data(buffer.prefix(n)))
+                } else if n == 0 {
+                    continuation.resume(returning: Data())
+                } else {
+                    if errno == EINTR || errno == EAGAIN {
+                        continuation.resume(returning: Data())
+                    } else {
+                        continuation.resume(throwing: EventSocketError.connectFailed("recv \(errno)"))
+                    }
                 }
             }
         }
@@ -264,6 +343,33 @@ public struct EventSocketClient: Sendable {
             data.append(0x0A)
         }
         try LocalUnixClient.send(data: data, to: path, timeout: connectTimeout)
+    }
+
+    /// Send one NDJSON line and wait for a decision reply (decision-mode hooks).
+    public func sendAndReceiveDecision(
+        _ envelope: EventEnvelope,
+        receiveTimeout: TimeInterval
+    ) throws -> PermissionDecisionReply {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        guard var data = try? encoder.encode(envelope) else {
+            throw EventSocketError.encodingFailed
+        }
+        data.append(0x0A)
+        let replyData = try LocalUnixClient.sendAndReceive(
+            data: data,
+            to: path,
+            connectTimeout: connectTimeout,
+            receiveTimeout: receiveTimeout
+        )
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        do {
+            return try decoder.decode(PermissionDecisionReply.self, from: replyData)
+        } catch {
+            throw EventSocketError.decodingFailed(error.localizedDescription)
+        }
     }
 }
 
@@ -395,13 +501,30 @@ final class LocalUnixListener: @unchecked Sendable {
 
 enum LocalUnixClient {
     static func send(data: Data, to path: URL, timeout: TimeInterval) throws {
+        let fd = try connect(to: path, timeout: timeout)
+        defer { Darwin.close(fd) }
+        try writeAll(fd: fd, data: data, timeout: timeout)
+    }
+
+    /// Connect, write one line, read one reply line (decision-mode).
+    static func sendAndReceive(
+        data: Data,
+        to path: URL,
+        connectTimeout: TimeInterval,
+        receiveTimeout: TimeInterval
+    ) throws -> Data {
+        let fd = try connect(to: path, timeout: connectTimeout)
+        defer { Darwin.close(fd) }
+        try writeAll(fd: fd, data: data, timeout: connectTimeout)
+        return try readLine(fd: fd, timeout: receiveTimeout, maxBytes: 65_536)
+    }
+
+    private static func connect(to path: URL, timeout: TimeInterval) throws -> Int32 {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
             throw EventSocketError.connectFailed("socket() failed: \(errno)")
         }
-        defer { Darwin.close(fd) }
 
-        // Prevent SIGPIPE killing the hook process if the peer closes early.
         var on: Int32 = 1
         _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
 
@@ -410,6 +533,7 @@ enum LocalUnixClient {
         let pathString = path.path
         let maxLen = MemoryLayout.size(ofValue: addr.sun_path) - 1
         guard pathString.utf8.count <= maxLen else {
+            Darwin.close(fd)
             throw EventSocketError.pathTooLong(pathString)
         }
         pathString.withCString { src in
@@ -418,7 +542,6 @@ enum LocalUnixClient {
             }
         }
 
-        // Non-blocking connect + poll for timeout (hooks must not hang).
         let flags = fcntl(fd, F_GETFL, 0)
         if flags >= 0 {
             _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
@@ -437,26 +560,33 @@ enum LocalUnixClient {
                 let timeoutMs = Int32((timeout * 1000).rounded(.up))
                 let pr = poll(&pfd, 1, timeoutMs)
                 if pr == 0 {
+                    Darwin.close(fd)
                     throw EventSocketError.connectTimeout(pathString)
                 }
                 if pr < 0 {
+                    Darwin.close(fd)
                     throw EventSocketError.connectFailed("poll failed: \(errno) path=\(pathString)")
                 }
                 var soError: Int32 = 0
                 var len = socklen_t(MemoryLayout<Int32>.size)
                 _ = getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &len)
                 if soError != 0 {
+                    Darwin.close(fd)
                     throw EventSocketError.connectFailed("connect failed: \(soError) path=\(pathString)")
                 }
             } else {
+                Darwin.close(fd)
                 throw EventSocketError.connectFailed("connect failed: \(err) path=\(pathString)")
             }
         }
 
-        // Restore blocking for the send path; still cap with SO_SNDTIMEO.
         if flags >= 0 {
             _ = fcntl(fd, F_SETFL, flags)
         }
+        return fd
+    }
+
+    private static func writeAll(fd: Int32, data: Data, timeout: TimeInterval) throws {
         var tv = timeval(
             tv_sec: Int(timeout),
             tv_usec: Int32((timeout.truncatingRemainder(dividingBy: 1)) * 1_000_000)
@@ -468,7 +598,6 @@ enum LocalUnixClient {
             var sent = 0
             let total = buffer.count
             while sent < total {
-                // MSG_NOSIGNAL is Linux; on Darwin SO_NOSIGPIPE above is the contract.
                 let n = Darwin.send(fd, base.advanced(by: sent), total - sent, 0)
                 if n < 0 {
                     if errno == EINTR { continue }
@@ -480,5 +609,39 @@ enum LocalUnixClient {
                 sent += n
             }
         }
+    }
+
+    private static func readLine(fd: Int32, timeout: TimeInterval, maxBytes: Int) throws -> Data {
+        var tv = timeval(
+            tv_sec: Int(timeout),
+            tv_usec: Int32((timeout.truncatingRemainder(dividingBy: 1)) * 1_000_000)
+        )
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+        var result = Data()
+        var byte: UInt8 = 0
+        let deadline = Date().addingTimeInterval(timeout)
+        while result.count < maxBytes {
+            if Date() > deadline {
+                throw EventSocketError.connectTimeout("receive")
+            }
+            let n = Darwin.recv(fd, &byte, 1, 0)
+            if n == 1 {
+                if byte == 0x0A { break }
+                result.append(byte)
+            } else if n == 0 {
+                break
+            } else {
+                if errno == EINTR { continue }
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    throw EventSocketError.connectTimeout("receive")
+                }
+                throw EventSocketError.connectFailed("recv failed: \(errno)")
+            }
+        }
+        guard !result.isEmpty else {
+            throw EventSocketError.decodingFailed("empty decision reply")
+        }
+        return result
     }
 }
