@@ -232,25 +232,15 @@ public actor SessionStore {
         if nap == CanonicalAgentEvent.permissionResolved.rawValue {
             decoded.clearApproval = true
             if decoded.resolvedApprovalId == nil {
-                decoded.resolvedApprovalId = EventDecodeHelpers.string(
-                    payload,
-                    "request_id",
-                    "tool_use_id",
-                    "toolUseId",
-                    "approval_id",
-                    "id"
-                )
+                // Same order as ``synthesizeApproval`` so NAP create/clear match.
+                decoded.resolvedApprovalId = Self.approvalCorrelationId(from: payload)
             }
         }
         if nap == CanonicalAgentEvent.questionAnswered.rawValue {
             decoded.clearQuestion = true
             if decoded.resolvedQuestionId == nil {
-                decoded.resolvedQuestionId = EventDecodeHelpers.string(
-                    payload,
-                    "prompt_id",
-                    "request_id",
-                    "id"
-                )
+                // Same order as ``synthesizeQuestion`` so NAP create/clear match.
+                decoded.resolvedQuestionId = Self.questionCorrelationId(from: payload)
             }
         }
         if decoded.isUnknown {
@@ -355,10 +345,11 @@ public actor SessionStore {
                 session.state = .waitingForInput
             }
             if decoded.clearApproval {
-                // Late resolutions must not dismiss a newer pending request.
+                // Require correlation: missing ID is not a match (stale OpenCode
+                // permission.replied without id must not clear a newer pending ask).
                 let matches: Bool = {
                     guard let rid = decoded.resolvedApprovalId, !rid.isEmpty else {
-                        return true
+                        return false
                     }
                     return session.pendingApproval?.id == rid
                 }()
@@ -372,7 +363,7 @@ public actor SessionStore {
             if decoded.clearQuestion {
                 let matches: Bool = {
                     guard let rid = decoded.resolvedQuestionId, !rid.isEmpty else {
-                        return true
+                        return false
                     }
                     return session.pendingQuestion?.id == rid
                 }()
@@ -748,20 +739,29 @@ public struct DecodedEvent: Sendable, Equatable {
 }
 
 extension SessionStore {
+    /// NAP / generic correlation keys (create + resolve share this order).
+    fileprivate static let approvalCorrelationKeys = [
+        "request_id", "tool_use_id", "toolUseId", "approval_id", "id",
+    ]
+    fileprivate static let questionCorrelationKeys = [
+        "id", "prompt_id", "request_id",
+    ]
+
+    fileprivate static func approvalCorrelationId(from payload: [String: JSONValue]) -> String? {
+        EventDecodeHelpers.string(payload, keys: approvalCorrelationKeys)
+    }
+
+    fileprivate static func questionCorrelationId(from payload: [String: JSONValue]) -> String? {
+        EventDecodeHelpers.string(payload, keys: questionCorrelationKeys)
+    }
+
     fileprivate static func synthesizeApproval(
         from payload: [String: JSONValue],
         sessionId: String,
         envelopeId: UUID,
         at: Date
     ) -> ApprovalRequest {
-        let requestId = EventDecodeHelpers.string(
-            payload,
-            "request_id",
-            "tool_use_id",
-            "toolUseId",
-            "approval_id",
-            "id"
-        ) ?? envelopeId.uuidString
+        let requestId = approvalCorrelationId(from: payload) ?? envelopeId.uuidString
         let tool = EventDecodeHelpers.string(payload, "tool_name", "tool", "name") ?? "tool"
         let summary = EventDecodeHelpers.string(payload, "summary", "description", "message")
             ?? "Approve \(tool)?"
@@ -783,8 +783,7 @@ extension SessionStore {
         envelopeId: UUID,
         at: Date
     ) -> QuestionPrompt {
-        let promptId = EventDecodeHelpers.string(payload, "id", "prompt_id", "request_id")
-            ?? envelopeId.uuidString
+        let promptId = questionCorrelationId(from: payload) ?? envelopeId.uuidString
         let prompt = EventDecodeHelpers.string(payload, "prompt", "question", "message")
             ?? "Agent needs input"
         return QuestionPrompt(

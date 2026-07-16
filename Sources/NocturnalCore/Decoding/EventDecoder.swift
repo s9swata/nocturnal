@@ -169,6 +169,11 @@ public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
 /// Shared helpers for source-specific decoders.
 public enum EventDecodeHelpers {
     public static func string(_ payload: [String: JSONValue], _ keys: String...) -> String? {
+        string(payload, keys: keys)
+    }
+
+    /// Array form for shared create/resolve key lists (order matters).
+    public static func string(_ payload: [String: JSONValue], keys: [String]) -> String? {
         for key in keys {
             if let value = payload[key]?.stringValue, !value.isEmpty {
                 return value

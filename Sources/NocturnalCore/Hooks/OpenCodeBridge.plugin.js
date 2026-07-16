@@ -462,13 +462,28 @@ export const NocturnalBridge = async ({ directory, worktree, client, serverUrl }
         } else if (type === "permission.replied") {
           // OpenCode TUI uses `response` (once|always|reject); some older
           // shapes used `reply`. Prefer the documented field.
+          // Always forward permission id so SessionStore can match against
+          // pendingApproval and ignore out-of-order uncorrelated replies.
           const response =
             props.response ?? props.reply ?? props.decision ?? null
+          const permissionId =
+            props.id ||
+            props.requestID ||
+            props.request_id ||
+            props.permissionID ||
+            props.permissionId ||
+            props.approval_id ||
+            event?.id ||
+            null
           await emit(
             "tool.approval_resolved",
             sessionId,
             {
               ...base,
+              request_id: permissionId,
+              id: permissionId,
+              approval_id: permissionId,
+              tool_use_id: permissionId,
               approved:
                 response !== "reject" &&
                 response !== "deny" &&

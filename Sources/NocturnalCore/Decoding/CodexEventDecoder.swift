@@ -129,14 +129,7 @@ public struct CodexEventDecoder: EventDecoding, Sendable {
             // Same correlation priority as ``HookDecisionTranslator/decisionRequestId(for:)``
             // so UI Approve/Deny unblocks the waiting forwarder when both `id` and
             // `tool_use_id` are present.
-            let requestId = EventDecodeHelpers.string(
-                payload,
-                "tool_use_id",
-                "toolUseId",
-                "request_id",
-                "approval_id",
-                "id"
-            )
+            let requestId = Self.approvalCorrelationId(from: payload)
                 ?? envelope.id.uuidString
             let tool = EventDecodeHelpers.string(payload, "tool", "tool_name", "name") ?? "tool"
             let summary = EventDecodeHelpers.string(payload, "summary", "description", "title")
@@ -159,20 +152,13 @@ public struct CodexEventDecoder: EventDecoding, Sendable {
             result.summaryHint = result.summaryHint ?? "Recovered from local Codex history"
         case "tool.approval_resolved":
             result.clearApproval = true
-            result.resolvedApprovalId = EventDecodeHelpers.string(
-                payload,
-                "tool_use_id",
-                "toolUseId",
-                "request_id",
-                "approval_id",
-                "id"
-            )
+            result.resolvedApprovalId = Self.approvalCorrelationId(from: payload)
             result.state = .running
             if let approved = EventDecodeHelpers.bool(payload, "approved", "ok") {
                 result.summaryHint = approved ? "Approval granted" : "Approval denied"
             }
         case "agent.question":
-            let promptId = EventDecodeHelpers.string(payload, "prompt_id", "id", "question_id")
+            let promptId = Self.questionCorrelationId(from: payload)
                 ?? envelope.id.uuidString
             let prompt = EventDecodeHelpers.string(payload, "prompt", "question", "text")
                 ?? "Agent needs input"
@@ -190,19 +176,32 @@ public struct CodexEventDecoder: EventDecoding, Sendable {
             result.summaryHint = result.summaryHint ?? prompt
         case "agent.question_answered":
             result.clearQuestion = true
-            result.resolvedQuestionId = EventDecodeHelpers.string(
-                payload,
-                "prompt_id",
-                "question_id",
-                "id",
-                "request_id"
-            )
+            // Same key order as agent.question so create/clear always share an id.
+            result.resolvedQuestionId = Self.questionCorrelationId(from: payload)
             result.state = .running
         default:
             result.isUnknown = true
         }
 
         return result
+    }
+
+    /// Correlation keys for approvals (create + resolve share this order).
+    private static let approvalCorrelationKeys = [
+        "tool_use_id", "toolUseId", "request_id", "approval_id", "id",
+    ]
+
+    /// Correlation keys for questions (create + answer share this order).
+    private static let questionCorrelationKeys = [
+        "prompt_id", "id", "question_id", "request_id",
+    ]
+
+    private static func approvalCorrelationId(from payload: [String: JSONValue]) -> String? {
+        EventDecodeHelpers.string(payload, keys: approvalCorrelationKeys)
+    }
+
+    private static func questionCorrelationId(from payload: [String: JSONValue]) -> String? {
+        EventDecodeHelpers.string(payload, keys: questionCorrelationKeys)
     }
 
     private func riskHint(from payload: [String: JSONValue]) -> ApprovalRiskHint {
