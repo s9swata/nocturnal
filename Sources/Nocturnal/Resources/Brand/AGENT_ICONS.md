@@ -1,20 +1,30 @@
 # Agent brand marks
 
-Monochrome identification marks for supported coding agents.
+**Runtime format: PNG only.**  
+`BrandAssets` loads `agent-*.png` via `NSImage` and sets `isTemplate = true` for monochrome tinting. SVG files are not used by the app.
 
-| File | Product | Source |
-|------|---------|--------|
-| `agent-openai` | Codex (OpenAI) | [Simple Icons](https://simpleicons.org/) `openai` (CC0 1.0) |
-| `agent-claude` | Claude Code | [Simple Icons](https://simpleicons.org/) `claude` (CC0 1.0) |
-| `agent-opencode` | OpenCode | Official-style square mark as published on [opencode.ai/brand](https://opencode.ai/brand) / community static SVG (Lobe Icons set) |
-| `agent-cursor` | Cursor | [Simple Icons](https://simpleicons.org/) `cursor` (CC0 1.0) |
-| `agent-grok` | Grok Build | Official-style mark from `icon-1024x1024.png` (Design Assets), converted to black-on-transparent template |
+## Current marks (favicontools)
 
-Rendered PNGs are black-on-transparent templates for SwiftUI `.template` tinting.
-Trademarks belong to their respective owners; used here only to identify third-party products.
+Regenerated with [favicontools](https://favicontools.com) MCP `generate_iconset` → download `icon-1024x1024.png` → black-on-transparent template PNGs.
 
-## Adding a mark
+| PNG (runtime) | Product | favicontools source |
+|---------------|---------|---------------------|
+| `agent-openai.png` | Codex | `simple-icons:openai` |
+| `agent-claude.png` | Claude Code | `simple-icons:claude` |
+| `agent-opencode.png` | OpenCode | `simple-icons:opencode` |
+| `agent-cursor.png` | Cursor | `simple-icons:cursor` |
+| `agent-grok.png` | Grok Build | Design asset `icon-1024x1024.png` (data URL) |
 
-1. Add `agent-<id>.svg` (24×24 viewBox, `fill="#000000"`) under this folder **and** `Assets/Brand/`.
-2. Rasterize: `rsvg-convert -w 128 -h 128 agent-<id>.svg -o agent-<id>.png`
-3. Wire `BrandAssets.agentMarkResourceName(for:)` + package allow-list in `Scripts/package_app.sh`.
+Also kept: `@2x` (256) and `-1024` masters next to each mark.
+
+## Refresh
+
+```bash
+Scripts/fetch_agent_icons_favicontools.sh
+# optional Grok logo override:
+GROK_LOGO="/path/to/icon-1024x1024.png" Scripts/fetch_agent_icons_favicontools.sh
+```
+
+## Packaging
+
+`Scripts/package_app.sh` copies the production allow-list of agent **PNGs** into `Nocturnal.app/Contents/Resources/Brand/`.
