@@ -1,0 +1,186 @@
+# Build Nocturnal.app, upload a versioned zip, and attach it to a GitHub Release.
+#
+# Usage
+# -----
+# A) Tag-driven (recommended):
+#      git tag v0.1.0 && git push origin v0.1.0
+#    → builds, uploads artifact, opens a **draft** release with the zip attached
+#
+# B) Manual (Actions → Release → Run workflow):
+#      version: 0.1.0
+#      create_tag: true  → also creates/pushes v0.1.0 and a draft release
+#      create_tag: false → zip artifact only (attach yourself when publishing)
+#
+# Artifact name: Nocturnal-vX.Y.Z-macos.zip (+ .sha256)
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Marketing version without leading v (e.g. 0.1.0)"
+        required: true
+        type: string
+      create_tag:
+        description: "Create and push git tag vVERSION after a successful build"
+        required: false
+        type: boolean
+        default: false
+      draft_release:
+        description: "Open a draft GitHub Release with the zip attached"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-package:
+    name: Build · package · artifact
+    runs-on: macos-14
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+      zip_name: ${{ steps.zip.outputs.zip_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+            VERSION="${TAG#v}"
+          else
+            VERSION="${{ inputs.version }}"
+            VERSION="${VERSION#v}"
+            if [[ -z "$VERSION" ]]; then
+              echo "version input is required for workflow_dispatch" >&2
+              exit 1
+            fi
+            TAG="v${VERSION}"
+          fi
+          # GitHub run number as CFBundleVersion so each CI build is unique.
+          BUILD_NUMBER="${{ github.run_number }}"
+
+          {
+            echo "version=${VERSION}"
+            echo "tag=${TAG}"
+            echo "build=${BUILD_NUMBER}"
+          } >> "$GITHUB_OUTPUT"
+
+          # package_app.sh sources version.env for Info.plist.
+          {
+            echo "MARKETING_VERSION=${VERSION}"
+            echo "BUILD_NUMBER=${BUILD_NUMBER}"
+          } > version.env
+
+          echo "Packaging Nocturnal ${TAG} (build ${BUILD_NUMBER})"
+          cat version.env
+
+      - name: Show toolchain
+        run: |
+          set -euo pipefail
+          # Prefer full Xcode when present (sips/iconutil/package_app).
+          if [[ -d /Applications/Xcode.app ]]; then
+            sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          fi
+          xcode-select -p
+          swift --version
+          xcodebuild -version || true
+          uname -m
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build
+            ~/Library/Caches/org.swift.swiftpm
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved', 'Package.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: Test
+        run: Scripts/run_tests.sh
+
+      - name: Package Nocturnal.app
+        env:
+          SIGNING_MODE: adhoc
+          NOCTURNAL_ICON_STAGE: production
+          # Host arch only on GHA (arm64 on macos-14). Set ARCHES="arm64 x86_64"
+          # if you later add a universal job.
+        run: Scripts/package_app.sh release
+
+      - name: Zip app for distribution
+        id: zip
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.ver.outputs.tag }}"
+          ZIP_NAME="Nocturnal-${TAG}-macos.zip"
+          cd build
+          rm -f "$ZIP_NAME" "${ZIP_NAME}.sha256"
+          # ditto preserves macOS resource forks / app bundle layout better than zip.
+          ditto -c -k --sequesterRsrc --keepParent Nocturnal.app "$ZIP_NAME"
+          shasum -a 256 "$ZIP_NAME" | tee "${ZIP_NAME}.sha256"
+          ls -lh "$ZIP_NAME"
+          echo "zip_name=${ZIP_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nocturnal-${{ steps.ver.outputs.tag }}
+          path: |
+            build/${{ steps.zip.outputs.zip_name }}
+            build/${{ steps.zip.outputs.zip_name }}.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create and push git tag
+        if: github.event_name == 'workflow_dispatch' && inputs.create_tag
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists — skipping create"
+          else
+            git tag -a "${TAG}" -m "Nocturnal ${{ steps.ver.outputs.version }}"
+            git push origin "refs/tags/${TAG}"
+            echo "Pushed ${TAG}"
+          fi
+
+      # Tag must exist (push tag, or create_tag above) before release attach.
+      - name: Create GitHub Release
+        if: |
+          github.ref_type == 'tag' ||
+          (github.event_name == 'workflow_dispatch' && inputs.create_tag)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: Nocturnal ${{ steps.ver.outputs.version }}
+          # Tag pushes always open as draft so you can review before publish.
+          # Manual runs honor the draft_release input.
+          draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft_release || true }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            build/${{ steps.zip.outputs.zip_name }}
+            build/${{ steps.zip.outputs.zip_name }}.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
