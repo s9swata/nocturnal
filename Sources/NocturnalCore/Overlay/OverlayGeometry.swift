@@ -35,9 +35,10 @@ public enum OverlayGeometry: Sendable {
     public static let belowChromeGap: CGFloat = 6
 
     /// Max island width as a fraction of screen width (leave room for menu extras).
-    public static let islandMaxScreenFraction: CGFloat = 0.42
+    public static let islandMaxScreenFraction: CGFloat = 0.48
     public static let islandMinWidth: CGFloat = 168
-    public static let islandMaxWidth: CGFloat = 380
+    /// Must be ≥ attention ideal so Deny/Allow chips are not panel-clipped.
+    public static let islandMaxWidth: CGFloat = 440
 
     public static var compactSize: CGSize {
         islandSize(for: .liveCompact)
@@ -59,8 +60,8 @@ public enum OverlayGeometry: Sendable {
         case .liveExpanded:
             return CGSize(width: 328, height: 56)
         case .attention:
-            // Room for mark + copy + Deny/Allow chips.
-            return CGSize(width: 400, height: 58)
+            // Mark + two-line copy + Deny/Allow; panel owns this size.
+            return CGSize(width: 420, height: 60)
         }
     }
 
@@ -70,10 +71,9 @@ public enum OverlayGeometry: Sendable {
         visibleFrame: CGRect
     ) -> CGSize {
         let ideal = islandSize(for: mode)
-        let maxW = min(
-            islandMaxWidth,
-            max(islandMinWidth, visibleFrame.width * islandMaxScreenFraction)
-        )
+        let fractionCap = max(islandMinWidth, visibleFrame.width * islandMaxScreenFraction)
+        // Never clamp a mode below its ideal unless the screen fraction forces it.
+        let maxW = min(islandMaxWidth, fractionCap)
         return CGSize(
             width: min(ideal.width, maxW),
             height: ideal.height

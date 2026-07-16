@@ -21,10 +21,6 @@ struct PillView: View {
         )
     }
 
-    private var islandSize: CGSize {
-        OverlayGeometry.islandSize(for: content.mode)
-    }
-
     private var isAttention: Bool { content.mode == .attention }
     private var isLive: Bool {
         content.mode == .liveCompact
@@ -45,17 +41,25 @@ struct PillView: View {
                 tappableIsland
             }
         }
-        .frame(width: islandSize.width, height: islandSize.height)
+        // Panel owns dimensions (OverlayGeometry); fill the host, never force a
+        // larger intrinsic width that clips against a clamped NSPanel frame.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(NocturnalMotion.standard(reduceMotion: reduceMotion), value: content.mode)
         .compositingGroup()
         .accessibilityElement(children: .contain)
         .accessibilityLabel(content.accessibilitySummary)
-        .onAppear { updatePulse() }
+        .onAppear {
+            updatePulse()
+            model.refreshPillIslandLayout()
+        }
         .onChange(of: content.mode) { _, _ in
             updatePulse()
             model.refreshPillIslandLayout()
         }
         .onChange(of: content.primary) { _, _ in
+            model.refreshPillIslandLayout()
+        }
+        .onChange(of: pendingApproval?.id) { _, _ in
             model.refreshPillIslandLayout()
         }
         .onChange(of: reduceMotion) { _, _ in updatePulse() }
@@ -89,7 +93,7 @@ struct PillView: View {
             .padding(.horizontal, horizontalPadding)
             .padding(.top, topPadding)
             .padding(.bottom, bottomPadding)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             .background { notchChrome }
             .clipShape(notchShape)
     }
@@ -102,35 +106,40 @@ struct PillView: View {
             Button {
                 model.setOverlayExpanded(true)
             } label: {
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     leadingMark
+                        .fixedSize()
                     centerColumn
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(decisionBusy)
+            .layoutPriority(0)
 
             if showDecisionChips, let request = pendingApproval {
                 decisionChips(for: request)
+                    .fixedSize()
+                    .layoutPriority(1)
             } else if !content.trailingSources.isEmpty || content.liveCount > 1 {
                 trailingStrip
+                    .fixedSize()
             }
         }
     }
 
     @ViewBuilder
     private func decisionChips(for request: ApprovalRequest) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             Button {
                 Task { await decide(request, approved: false) }
             } label: {
                 Text("Deny")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(NocturnalPalette.accentDanger)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
                     .background(
                         Capsule(style: .continuous)
                             .strokeBorder(NocturnalPalette.accentDanger.opacity(0.55), lineWidth: 1)
@@ -147,8 +156,8 @@ struct PillView: View {
                 Text("Allow")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(NocturnalPalette.bgBase)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
                     .background(
                         Capsule(style: .continuous)
                             .fill(NocturnalPalette.fgPrimary.opacity(0.92))
@@ -171,13 +180,15 @@ struct PillView: View {
 
     @ViewBuilder
     private var leadingMark: some View {
+        // Fixed container so attention ring pulse never paints outside clip.
+        let ringPad: CGFloat = isAttention ? 6 : 0
+        let box = markSize + ringPad * 2
         ZStack {
             if isAttention {
                 Circle()
                     .strokeBorder(NocturnalPalette.accentAttention.opacity(0.85), lineWidth: 1.5)
-                    .frame(width: markSize + 8, height: markSize + 8)
-                    .opacity(markPulse && !reduceMotion ? 0.45 : 1)
-                    .scaleEffect(markPulse && !reduceMotion ? 1.08 : 1)
+                    .frame(width: markSize + ringPad, height: markSize + ringPad)
+                    .opacity(markPulse && !reduceMotion ? 0.4 : 1)
             }
             if let source = content.source {
                 AgentBrandMark(
@@ -192,7 +203,7 @@ struct PillView: View {
                     .opacity(content.mode == .listening ? (markPulse ? 0.75 : 1) : 0.9)
             }
         }
-        .frame(width: markSize + (isAttention ? 8 : 0), height: markSize + (isAttention ? 8 : 0))
+        .frame(width: box, height: box)
     }
 
     @ViewBuilder
@@ -203,7 +214,8 @@ struct PillView: View {
                 .foregroundStyle(primaryColor)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .minimumScaleFactor(0.85)
+                .minimumScaleFactor(0.8)
+                .allowsTightening(true)
 
             if let secondary = content.secondary,
                !secondary.isEmpty,
@@ -214,6 +226,7 @@ struct PillView: View {
                     .foregroundStyle(NocturnalPalette.fgSecondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .minimumScaleFactor(0.8)
             }
         }
     }
@@ -254,7 +267,9 @@ struct PillView: View {
         switch content.mode {
         case .quiet, .listening: return 14
         case .liveCompact: return 15
-        case .liveExpanded, .attention: return 14
+        case .liveExpanded: return 16
+        // ≥ bottom radius so corner clip does not eat the leading mark.
+        case .attention: return 18
         }
     }
 
@@ -271,7 +286,8 @@ struct PillView: View {
         case .quiet: return 8
         case .listening: return 9
         case .liveCompact: return 10
-        case .liveExpanded, .attention: return 11
+        case .liveExpanded: return 11
+        case .attention: return 12
         }
     }
 

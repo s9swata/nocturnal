@@ -86,7 +86,17 @@ struct PillIslandPresentationTests {
         #expect(quiet.height <= live.height)
         #expect(live.height <= expanded.height)
         // Attention is widest for Deny/Allow chips.
-        #expect(attention.width >= 380)
+        #expect(attention.width >= 400)
+        #expect(OverlayGeometry.islandMaxWidth >= attention.width)
+    }
+
+    @Test func attentionIslandIsNotClampedOnTypicalLaptop() {
+        // 14" MacBook-class visible width should keep full attention ideal.
+        let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let ideal = OverlayGeometry.islandSize(for: .attention)
+        let size = OverlayGeometry.clampedIslandSize(for: .attention, visibleFrame: visible)
+        #expect(size.width == ideal.width)
+        #expect(size.height == ideal.height)
     }
 
     @Test func clampedIslandNeverExceedsScreenFraction() {
