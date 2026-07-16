@@ -101,9 +101,19 @@ public actor SessionStore {
         } catch {
             return 0
         }
+        let now = Date()
         var merged = 0
-        for session in loaded {
+        for var session in loaded {
+            // Always repair OpenCode mislabels + stuck running on load.
+            let repaired = OpenCodeSessionIdentity.repair(&session, now: now)
             if let existing = sessionsByID[session.id], existing.updatedAt >= session.updatedAt {
+                // Disk not newer — still repair the live copy (source / zombie idle).
+                if var live = sessionsByID[session.id] {
+                    if OpenCodeSessionIdentity.repair(&live, now: now) {
+                        sessionsByID[session.id] = live
+                        try? await store.save(live)
+                    }
+                }
                 continue
             }
             sessionsByID[session.id] = session
@@ -111,6 +121,18 @@ public actor SessionStore {
                 order.append(session.id)
             }
             merged += 1
+            // Always rewrite repaired rows so next launch stays clean.
+            if repaired {
+                try? await store.save(session)
+            }
+        }
+        // Second pass: repair every in-memory session (covers order-only / edge cases).
+        for id in order {
+            guard var live = sessionsByID[id] else { continue }
+            if OpenCodeSessionIdentity.repair(&live, now: now) {
+                sessionsByID[id] = live
+                try? await store.save(live)
+            }
         }
         // Keep most-recently updated first.
         order.sort { lhs, rhs in
@@ -118,9 +140,29 @@ public actor SessionStore {
             let r = sessionsByID[rhs]?.updatedAt ?? .distantPast
             return l > r
         }
-        pruneToPolicy(now: Date())
+        pruneToPolicy(now: now)
         bumpAndPublish()
         return merged
+    }
+
+    /// Force re-repair of every session (e.g. after upgrade). Persists changes.
+    @discardableResult
+    public func repairAllOpenCodeSessions(now: Date = Date()) async -> Int {
+        var fixed = 0
+        for id in order {
+            guard var session = sessionsByID[id] else { continue }
+            if OpenCodeSessionIdentity.repair(&session, now: now) {
+                sessionsByID[id] = session
+                fixed += 1
+                if let persistence {
+                    try? await persistence.save(session)
+                }
+            }
+        }
+        if fixed > 0 {
+            bumpAndPublish()
+        }
+        return fixed
     }
 
     // MARK: - Reads
@@ -168,16 +210,20 @@ public actor SessionStore {
         }
 
         let sessionID = SessionID(envelope.sessionId)
-        let source: AgentSource = {
-            if envelope.source != .unknown { return envelope.source }
-            return decoded.inferredSource
-        }()
+        let titleHint = decoded.titleHint
+        // OpenCode ses_* / "New session - ISO" never become Claude via PascalCase inference.
+        let source = OpenCodeSessionIdentity.resolveSource(
+            sessionId: envelope.sessionId,
+            title: titleHint,
+            wireSource: envelope.source,
+            inferredSource: decoded.inferredSource
+        )
 
         var session = sessionsByID[sessionID] ?? Session(
             id: sessionID,
             source: source,
             state: .idle,
-            title: decoded.titleHint ?? "",
+            title: titleHint ?? "",
             createdAt: envelope.timestamp,
             updatedAt: envelope.timestamp
         )
@@ -188,13 +234,25 @@ public actor SessionStore {
         // Older events must not rewind or revive terminal / newer sessions.
         let allowLifecycleMutation = !isStaleEvent && !(isTerminal && envelope.timestamp <= session.updatedAt)
 
-        // Prefer a known source over unknown when we learn more.
-        if session.source == .unknown, source != .unknown {
+        // Identity: OpenCode heuristics win; otherwise prefer wire then first known.
+        if OpenCodeSessionIdentity.looksLikeOpenCode(
+            sessionId: session.id.rawValue,
+            title: titleHint ?? session.title,
+            source: source
+        ) {
+            session.source = .opencode
+        } else if envelope.source != .unknown {
+            session.source = envelope.source
+        } else if session.source == .unknown, source != .unknown {
             session.source = source
         }
 
-        if let title = decoded.titleHint, !title.isEmpty {
+        if let title = titleHint, !title.isEmpty {
             session.title = title
+            // Title can prove OpenCode after the fact (mislabel repair).
+            if OpenCodeSessionIdentity.isOpenCodeTitle(title) {
+                session.source = .opencode
+            }
         }
         if let summary = decoded.summaryHint, allowLifecycleMutation || !isTerminal {
             // Allow summary refresh on non-lifecycle stale events only when not terminal revival.
@@ -207,6 +265,19 @@ public actor SessionStore {
             var jump = session.jumpBack ?? JumpBackContext()
             jump.workingDirectory = cwd
             session.jumpBack = jump
+        }
+        // Capture local transcript path for optional detail enrichment.
+        if let path = EventDecodeHelpers.string(
+            envelope.payload,
+            "transcript_path",
+            "transcriptPath",
+            "rollout_path"
+        ) ?? EventDecodeHelpers.string(
+            envelope.raw,
+            "transcript_path",
+            "transcriptPath"
+        ) {
+            session.transcriptPath = path
         }
 
         if allowLifecycleMutation {
@@ -270,6 +341,16 @@ public actor SessionStore {
             session.recentEventIDs.removeFirst(session.recentEventIDs.count - recentEventLimit)
         }
 
+        SessionActivityMapping.apply(
+            to: &session,
+            envelope: envelope,
+            decoded: decoded,
+            allowLifecycleMutation: allowLifecycleMutation
+        )
+
+        // Demote OpenCode start-shell zombies; repair any residual mislabel.
+        OpenCodeSessionIdentity.repair(&session)
+
         // Stale events may merge metadata but must not reorder the session list.
         await upsert(session, persist: true, promoteToFront: !isStaleEvent)
         return session
@@ -284,14 +365,31 @@ public actor SessionStore {
         switch response {
         case .approval(let decision):
             guard var session = sessionsByID[decision.sessionId] else { return nil }
-            guard session.pendingApproval?.id == decision.requestId else {
+            guard let pending = session.pendingApproval, pending.id == decision.requestId else {
                 // Mismatched id — leave state untouched.
                 return session
+            }
+            // Sticky always-allow: record tool from pending request before clearing.
+            if decision.approved, decision.resolvedScope == .sessionTool {
+                let key = Session.normalizedToolName(pending.toolName)
+                if !key.isEmpty {
+                    session.sessionAlwaysAllowTools.insert(key)
+                }
             }
             session.pendingApproval = nil
             session.state = .running
             session.summary = decision.approved ? "Approved" : "Denied"
             session.updatedAt = decision.decidedAt
+            SessionActivityPolicy.endCurrent(on: &session, at: decision.decidedAt)
+            SessionActivityPolicy.setCurrent(
+                SessionActivity(
+                    kind: .turn,
+                    label: decision.approved ? "Approved" : "Denied",
+                    eventType: "local.approval",
+                    startedAt: decision.decidedAt
+                ),
+                on: &session
+            )
             await upsert(session, persist: true, promoteToFront: true)
             return session
         case .question(let answer):
@@ -303,6 +401,16 @@ public actor SessionStore {
             session.state = .running
             session.summary = "Answered"
             session.updatedAt = answer.answeredAt
+            SessionActivityPolicy.endCurrent(on: &session, at: answer.answeredAt)
+            SessionActivityPolicy.setCurrent(
+                SessionActivity(
+                    kind: .turn,
+                    label: "Answered",
+                    eventType: "local.answer",
+                    startedAt: answer.answeredAt
+                ),
+                on: &session
+            )
             await upsert(session, persist: true, promoteToFront: true)
             return session
         }
@@ -310,6 +418,32 @@ public actor SessionStore {
 
     public func upsert(_ session: Session) async {
         await upsert(session, persist: true, promoteToFront: true)
+    }
+
+    /// Attach a local log detail snapshot and merge found tokens/diff into stats.
+    @discardableResult
+    public func applyDetailSnapshot(_ detail: SessionDetailSnapshot) async -> Session? {
+        guard var session = sessionsByID[detail.sessionId] else { return nil }
+        session.detailSnapshot = detail
+        if let path = detail.transcriptPath {
+            session.transcriptPath = path
+        }
+        session.stats.mergeMetrics(
+            tokensIn: detail.tokensIn,
+            tokensOut: detail.tokensOut,
+            diffAdded: detail.diffAdded,
+            diffRemoved: detail.diffRemoved
+        )
+        // Prefer JSONL tool rows when we have more history than hot activities.
+        if !detail.recentToolRows.isEmpty, session.recentActivities.count < detail.recentToolRows.count {
+            let merged = detail.recentToolRows.prefix(SessionActivityPolicy.maxRecent)
+            // Keep existing hook activities first if fresher; else use detail rows.
+            if session.recentActivities.isEmpty {
+                session.recentActivities = Array(merged)
+            }
+        }
+        await upsert(session, persist: true, promoteToFront: false)
+        return session
     }
 
     public func remove(id: SessionID) async {

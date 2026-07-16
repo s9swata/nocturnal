@@ -22,6 +22,10 @@ let package = Package(
         .target(
             name: "NocturnalCore",
             path: "Sources/NocturnalCore",
+            exclude: [
+                // Loaded at install time via #filePath, not compiled into the module.
+                "Hooks/OpenCodeBridge.plugin.js",
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]

@@ -24,15 +24,18 @@ public struct EventDecodeMetrics: Sendable, Equatable {
 public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
     private let codex: CodexEventDecoder
     private let claude: ClaudeEventDecoder
+    private let opencode: OpenCodeEventDecoder
     private let lock = NSLock()
     private var metrics = EventDecodeMetrics()
 
     public init(
         codex: CodexEventDecoder = CodexEventDecoder(),
-        claude: ClaudeEventDecoder = ClaudeEventDecoder()
+        claude: ClaudeEventDecoder = ClaudeEventDecoder(),
+        opencode: OpenCodeEventDecoder = OpenCodeEventDecoder()
     ) {
         self.codex = codex
         self.claude = claude
+        self.opencode = opencode
     }
 
     public func decode(_ envelope: EventEnvelope) -> DecodedEvent {
@@ -42,7 +45,30 @@ public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
             result = codex.decode(envelope)
         case .claude:
             result = claude.decode(envelope)
+        case .opencode:
+            result = opencode.decode(envelope)
         case .unknown:
+            // OpenCode ses_* / native bus names — never Claude by accident.
+            if OpenCodeSessionIdentity.isOpenCodeSessionId(envelope.sessionId)
+                || OpenCodeEventDecoder.implementedEventTypes.contains(envelope.eventType)
+                    && !CodexEventDecoder.implementedEventTypes.contains(envelope.eventType)
+                    && !ClaudeEventDecoder.implementedEventTypes.contains(envelope.eventType)
+            {
+                result = opencode.decode(envelope)
+                break
+            }
+            // Current Codex and Claude lifecycle names overlap. Without an
+            // explicit source, retain the historical Claude interpretation;
+            // native Codex installs always pass `--wrap-source codex`.
+            // Exception: OpenCode plugin maps to the same PascalCase names but
+            // always uses ses_* ids (handled above).
+            if ClaudeEventDecoder.implementedEventTypes.contains(envelope.eventType),
+               CodexEventDecoder.implementedEventTypes.contains(envelope.eventType),
+               envelope.eventType.first?.isUppercase == true
+            {
+                result = claude.decode(envelope)
+                break
+            }
             // Try both; prefer first non-unknown structured decode.
             // Unrecognized source strings (including obsolete labels) land here.
             let codexResult = codex.decode(envelope)
@@ -53,7 +79,12 @@ public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
                 if !claudeResult.isUnknown {
                     result = claudeResult
                 } else {
-                    result = Self.unknownPassthrough(envelope)
+                    let openResult = opencode.decode(envelope)
+                    if !openResult.isUnknown {
+                        result = openResult
+                    } else {
+                        result = Self.unknownPassthrough(envelope)
+                    }
                 }
             }
         }

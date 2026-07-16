@@ -1,6 +1,6 @@
 # Nocturnal
 
-Local-first macOS companion for AI coding agents (Codex & Claude Code).
+Local-first macOS companion for AI coding agents (Codex, Claude Code, and OpenCode).
 
 - Free, offline, no accounts or telemetry  
 - Menu bar + optional floating pill  
@@ -38,8 +38,9 @@ Coverage includes event decoding, session state transitions, socket bridge
 round-trips (short `/tmp` paths), persistence load/save/corruption, hook install
 in **temp directories only**, and response routing.
 
-**Never** point setup/hook tests at real `~/.codex` or `~/.claude` — use
-`NOCTURNAL_CONFIG_ROOT` (tests inject temp roots automatically).
+**Never** point setup/hook tests at real `~/.codex`, `~/.claude`, or
+`~/.config/opencode` — use `NOCTURNAL_CONFIG_ROOT` (tests inject temp roots
+automatically).
 
 ## Run the app
 
@@ -61,7 +62,7 @@ The package script:
 - Generates **`Icon.icns`** from `Assets/Brand/nocturnal-app-icon.png` (`CFBundleIconFile`)
 - Copies brand marks to `Contents/Resources/Brand/`
 - Copies helpers to `Contents/Resources/Helpers/` and `Contents/MacOS/`
-- Bundles `Fixtures/{codex,claude}/` for offline simulation
+- Bundles `Fixtures/{codex,claude,opencode}/` for offline simulation
 - Ad-hoc signs the bundle (`codesign --sign -`)
 
 Verify:
@@ -75,7 +76,7 @@ ls build/Nocturnal.app/Contents/Resources/{Icon.icns,Brand}
 
 ## First launch (no sessions)
 
-With hooks not yet installed, the menu bar / pill / window show a calm empty state: owl mark, short copy that Codex and Claude sessions appear after hooks connect, and actions to open Settings or copy/reveal `nocturnal-setup install --product all`.
+With hooks not yet installed, the menu bar / pill / window show a calm empty state: owl mark, short copy that agent sessions appear after hooks/plugins connect, and actions to open Settings or copy/reveal `nocturnal-setup install --product all` (Codex, Claude, and OpenCode).
 
 There is **no product demo mode**.
 
@@ -97,18 +98,24 @@ cat Fixtures/codex/approval-required.ndjson | "$BIN/nocturnal-hook-forwarder"
 
 Full recipes: [`docs/simulation.md`](docs/simulation.md).
 
-## Install agent hooks (careful)
+## Install agent hooks
 
-Setup writes **Nocturnal-managed sidecars** only. Prefer a sandbox root while developing:
+Setup safely merges Nocturnal command handlers into native agent hooks and writes a
+Nocturnal-owned descriptor. Existing configs are backed up first. Prefer a sandbox
+root while developing:
 
 ```bash
 export NOCTURNAL_CONFIG_ROOT="/tmp/nocturnal-setup-test"
 export NOCTURNAL_APP_SUPPORT="/tmp/nocturnal-setup-test/app-support"
 mkdir -p "$NOCTURNAL_CONFIG_ROOT" "$NOCTURNAL_APP_SUPPORT"
 
-swift run nocturnal-setup -- install --product all
-swift run nocturnal-setup -- status
+swift run nocturnal-setup install --product all
+swift run nocturnal-setup doctor
 ```
+
+`repair` migrates Nocturnal's obsolete Codex hook array to the current lifecycle
+map without removing valid foreign handlers. `--mode sidecar` is descriptor-only
+and does not connect the agents.
 
 See [`docs/HOOK_SCHEMAS.md`](docs/HOOK_SCHEMAS.md) for implemented event types.
 
@@ -119,7 +126,7 @@ See [`docs/HOOK_SCHEMAS.md`](docs/HOOK_SCHEMAS.md) for implemented event types.
 | `NocturnalCore` | Models, session store actor, socket, decode, persist, jump-back |
 | `Nocturnal` | SwiftUI app shell |
 | `nocturnal-hook-forwarder` | stdin → socket (always exit 0) |
-| `nocturnal-setup` | Idempotent hook install/uninstall |
+| `nocturnal-setup` | Idempotent native hook install/Doctor/repair/uninstall |
 
 Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · agent handoff: [`ARCHITECT_HANDOFF.md`](ARCHITECT_HANDOFF.md) · QA: [`QA_REPORT.md`](QA_REPORT.md)
 

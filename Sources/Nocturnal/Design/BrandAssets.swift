@@ -1,4 +1,5 @@
 import AppKit
+import NocturnalCore
 import SwiftUI
 
 /// Centralized brand image loading — never hardcode resource paths in views.
@@ -9,6 +10,13 @@ import SwiftUI
 enum BrandAssets {
     static let owlMarkResourceName = "nocturnal-owl-mark"
     static let appIconResourceName = "nocturnal-app-icon"
+
+    /// Codex uses OpenAI’s public mark (Simple Icons CC0); see `Brand/AGENT_ICONS.md`.
+    static let codexMarkResourceName = "agent-openai"
+    /// Claude Code uses Claude’s public mark (Simple Icons CC0).
+    static let claudeMarkResourceName = "agent-claude"
+    /// OpenCode square mark (brand-aligned static SVG).
+    static let openCodeMarkResourceName = "agent-opencode"
 
     /// Thread-safe immutable source cache. Entries are never mutated after insert.
     private static let sourceCache = ImageSourceCache()
@@ -30,6 +38,36 @@ enum BrandAssets {
             image.size = NSSize(width: size, height: size)
         }
         return image
+    }
+
+    /// Monochrome agent product mark for Codex / Claude Code / OpenCode.
+    static func agentMarkNSImage(for source: AgentSource, size: CGFloat? = nil) -> NSImage? {
+        guard let name = agentMarkResourceName(for: source) else { return nil }
+        guard let image = mutableCopyOfSource(named: name) else { return nil }
+        image.isTemplate = true
+        if let size {
+            image.size = NSSize(width: size, height: size)
+        }
+        return image
+    }
+
+    static func agentMarkResourceName(for source: AgentSource) -> String? {
+        switch source {
+        case .codex: return codexMarkResourceName
+        case .claude: return claudeMarkResourceName
+        case .opencode: return openCodeMarkResourceName
+        case .unknown: return nil
+        }
+    }
+
+    /// SF Symbol fallback when a brand PNG is missing from the bundle.
+    static func agentFallbackSystemImage(for source: AgentSource) -> String {
+        switch source {
+        case .codex: return "cpu"
+        case .claude: return "bubble.left.and.bubble.right"
+        case .opencode: return "chevron.left.forwardslash.chevron.right"
+        case .unknown: return "circle.dashed"
+        }
     }
 
     /// Returns a detached copy of the cached source, or loads and caches once.
@@ -143,5 +181,35 @@ struct BrandAppIcon: View {
                     .frame(width: size, height: size)
             }
         }
+    }
+}
+
+/// Product mark for a coding agent (Codex / Claude / OpenCode).
+/// Template-tinted monochrome brand SVG→PNG; falls back to an SF Symbol.
+struct AgentBrandMark: View {
+    let source: AgentSource
+    var size: CGFloat = 13
+    var color: Color = NocturnalPalette.fgSecondary
+
+    var body: some View {
+        Group {
+            if let nsImage = BrandAssets.agentMarkNSImage(for: source, size: size) {
+                Image(nsImage: nsImage)
+                    .renderingMode(.template)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: size, height: size)
+                    .foregroundStyle(color)
+                    .accessibilityHidden(true)
+            } else {
+                Image(systemName: BrandAssets.agentFallbackSystemImage(for: source))
+                    .font(.system(size: size * 0.85, weight: .semibold))
+                    .foregroundStyle(color)
+                    .frame(width: size, height: size)
+                    .accessibilityHidden(true)
+            }
+        }
+        .accessibilityLabel(source.displayName)
     }
 }

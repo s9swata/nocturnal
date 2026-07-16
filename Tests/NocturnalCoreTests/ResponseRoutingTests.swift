@@ -200,4 +200,56 @@ struct ResponseRoutingTests {
         #expect(updated?.summary == "Denied")
         #expect(try transport.load(requestId: "e2e-req") != nil)
     }
+
+    @Test func fileTransportSerializesScopeAndNoteOnSidecars() async throws {
+        let (temp, cleanup) = try TestSupport.makeTempRoot(prefix: "nocturnal-resp-scope")
+        defer { cleanup() }
+
+        let paths = try TestSupport.makePaths(in: temp)
+        let transport = FileResponseTransport(paths: paths, writeAgentSidecars: true)
+        let decision = ApprovalDecision(
+            requestId: "req-scope-1",
+            sessionId: SessionID("sess-scope"),
+            approved: true,
+            note: "always for session",
+            scope: .sessionTool
+        )
+        try await transport.submit(.approval(decision))
+
+        let loaded = try transport.load(requestId: "req-scope-1")
+        guard case .approval(let roundTripped)? = loaded else {
+            Issue.record("Expected approval envelope on disk")
+            return
+        }
+        #expect(roundTripped.scope == .sessionTool)
+        #expect(roundTripped.note == "always for session")
+        #expect(roundTripped.resolvedScope == .sessionTool)
+
+        let codexSide = paths.responseSidecarFile(agent: "codex", requestId: "req-scope-1")
+        let claudeSide = paths.responseSidecarFile(agent: "claude", requestId: "req-scope-1")
+        let codexJSON = try JSONSerialization.jsonObject(with: Data(contentsOf: codexSide)) as? [String: Any]
+        let claudeJSON = try JSONSerialization.jsonObject(with: Data(contentsOf: claudeSide)) as? [String: Any]
+        #expect(codexJSON?["scope"] as? String == "sessionTool")
+        #expect(codexJSON?["note"] as? String == "always for session")
+        #expect(claudeJSON?["scope"] as? String == "sessionTool")
+        #expect(claudeJSON?["note"] as? String == "always for session")
+        #expect(claudeJSON?["permission"] as? String == "allow")
+    }
+
+    @Test func approvalDecisionMissingScopeDecodesAsOnce() throws {
+        let json = """
+        {
+          "requestId": "r1",
+          "sessionId": "s1",
+          "approved": true,
+          "decidedAt": "2026-01-01T00:00:00Z"
+        }
+        """.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decision = try decoder.decode(ApprovalDecision.self, from: json)
+        #expect(decision.scope == .once)
+        #expect(decision.resolvedScope == .once)
+        #expect(decision.note == nil)
+    }
 }

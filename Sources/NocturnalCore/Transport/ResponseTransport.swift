@@ -84,6 +84,7 @@ public struct FileResponseTransport: ResponseTransporting {
                 "session_id": .string(decision.sessionId.rawValue),
                 "approved": .bool(decision.approved),
                 "note": decision.note.map { .string($0) } ?? .null,
+                "scope": .string(decision.resolvedScope.rawValue),
                 "decided_at": .string(ISO8601DateFormatter().string(from: decision.decidedAt)),
             ]
             try encoder.encode(codex).write(to: codexURL, options: [.atomic])
@@ -98,6 +99,7 @@ public struct FileResponseTransport: ResponseTransporting {
                 "session_id": .string(decision.sessionId.rawValue),
                 "permission": .string(decision.approved ? "allow" : "deny"),
                 "note": decision.note.map { .string($0) } ?? .null,
+                "scope": .string(decision.resolvedScope.rawValue),
             ]
             try encoder.encode(claude).write(to: claudeURL, options: [.atomic])
 

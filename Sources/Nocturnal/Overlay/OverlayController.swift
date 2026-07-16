@@ -3,10 +3,12 @@ import NocturnalCore
 import QuartzCore
 import SwiftUI
 
-/// Hosts a non-activating floating pill near the menu bar / notch.
+/// Hosts a non-activating floating pill that **extends the camera notch**.
 ///
-/// Notch-aware top-center placement, multi-display awareness, and expand/collapse
-/// sizing live here. SwiftUI owns visual content via ``OverlayRootView``.
+/// Compact and expanded panels hang from the absolute top of the screen so the
+/// black chrome reads as a housing extension, not a card under the menu bar.
+/// Multi-display awareness and expand/collapse sizing live here. SwiftUI owns
+/// visual content via ``OverlayRootView``.
 ///
 /// ## Geometry ownership
 /// **`NSPanel` is the single source of truth for overlay dimensions.** The hosting
@@ -22,7 +24,7 @@ import SwiftUI
 /// - Disables AppKit **window** shadow (`hasShadow = false`) — the system shadow
 ///   is rectangular around the content rect and reads as square margins
 /// - Clears `NSHostingView` / content layer backgrounds
-/// - Relies on SwiftUI capsule fill + capsule-shaped shadow only
+/// - Relies on SwiftUI notch-extension fill + bottom-weighted shadow only
 @MainActor
 final class OverlayController {
     private var panel: NSPanel?
@@ -38,7 +40,11 @@ final class OverlayController {
 
         if panel == nil {
             let screen = preferredScreen()
-            let size = targetSize(expanded: expanded, on: screen)
+            let size = targetSize(
+                expanded: expanded,
+                islandMode: currentIslandMode(),
+                on: screen
+            )
 
             let root = OverlayRootView(model: model)
             let hosting = NSHostingView(rootView: root)
@@ -102,7 +108,8 @@ final class OverlayController {
 
     func setExpanded(_ expanded: Bool, reduceMotion: Bool, animated: Bool = true) {
         guard let panel, let screen = preferredScreen() else { return }
-        let size = targetSize(expanded: expanded, on: screen)
+        let mode = currentIslandMode()
+        let size = targetSize(expanded: expanded, islandMode: mode, on: screen)
         let frame = frameForSize(size, on: screen)
 
         // Keep AppKit window shadow off in both modes; SwiftUI draws soft shadows
@@ -135,6 +142,12 @@ final class OverlayController {
         guard panel != nil else { return }
         setExpanded(expanded, reduceMotion: reduceMotion, animated: false)
         positionPanel(expanded: expanded)
+    }
+
+    /// Morph compact island size when mode changes (quiet → live → attention).
+    func refreshIslandLayout(reduceMotion: Bool, animated: Bool = true) {
+        guard panel != nil, model?.isOverlayExpanded != true else { return }
+        setExpanded(false, reduceMotion: reduceMotion, animated: animated)
     }
 
     // MARK: - Geometry (Core policy — see ``OverlayGeometry``)
@@ -223,12 +236,30 @@ final class OverlayController {
 
     // MARK: - Private geometry
 
-    private func targetSize(expanded: Bool, on screen: NSScreen?) -> NSSize {
+    private func currentIslandMode() -> PillIslandMode {
+        guard let model else { return .listening }
+        return PillIslandPresentation.content(
+            sessions: model.snapshot.sessions,
+            socketRunning: model.isSocketRunning
+        ).mode
+    }
+
+    private func targetSize(
+        expanded: Bool,
+        islandMode: PillIslandMode,
+        on screen: NSScreen?
+    ) -> NSSize {
         if expanded {
             guard let screen else { return Self.idealExpandedSize }
             return Self.clampedExpandedSize(visibleFrame: screen.visibleFrame)
         }
-        return Self.compactSize
+        let visible = screen?.visibleFrame
+            ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let size = OverlayGeometry.clampedIslandSize(
+            for: islandMode,
+            visibleFrame: visible
+        )
+        return NSSize(width: size.width, height: size.height)
     }
 
     private func preferredScreen() -> NSScreen? {
@@ -242,20 +273,25 @@ final class OverlayController {
 
     private func positionPanel(expanded: Bool) {
         guard let panel, let screen = preferredScreen() else { return }
-        let size = targetSize(expanded: expanded, on: screen)
+        let size = targetSize(
+            expanded: expanded,
+            islandMode: currentIslandMode(),
+            on: screen
+        )
         let frame = frameForSize(size, on: screen)
         panel.setFrame(frame, display: true)
     }
 
-    /// Top-center or notch-safe placement via Core pure geometry.
+    /// Notch-hug top-center placement via Core pure geometry.
     private func frameForSize(_ size: NSSize, on screen: NSScreen) -> NSRect {
         let rect = OverlayGeometry.topCenterFrame(
             size: CGSize(width: size.width, height: size.height),
             screenFrame: screen.frame,
             visibleFrame: screen.visibleFrame,
             safeAreaTop: screen.safeAreaInsets.top,
-            gap: 6,
-            edgeInset: OverlayGeometry.screenEdgeInset
+            gap: OverlayGeometry.notchHugGap,
+            edgeInset: OverlayGeometry.screenEdgeInset,
+            hugTop: true
         )
         return NSRect(x: rect.origin.x, y: rect.origin.y, width: rect.width, height: rect.height)
     }

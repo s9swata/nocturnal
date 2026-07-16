@@ -27,6 +27,10 @@ public struct HookForwardResult: Sendable, Equatable {
 public struct HookForwarderOptions: Sendable, Equatable {
     /// Connect timeout upper bound (seconds) safe for Int32 millisecond conversion.
     public static let maxConnectTimeout: TimeInterval = HookForwarderCLIOptions.maxTimeout
+    /// Max seconds to wait for a Nocturnal UI decision on PermissionRequest.
+    public static let maxDecisionTimeout: TimeInterval = 600
+    /// Default UI wait for permission decisions (Codex hook timeout is often 600s).
+    public static let defaultDecisionTimeout: TimeInterval = 120
 
     /// Connect timeout in seconds (always positive, finite, ≤ ``maxConnectTimeout``).
     public var connectTimeout: TimeInterval
@@ -34,13 +38,19 @@ public struct HookForwarderOptions: Sendable, Equatable {
     public var wrapSource: AgentSource?
     /// Optional default session id when wrapping raw hooks that omit one.
     public var defaultSessionId: String?
+    /// How long to block waiting for Allow/Deny in Nocturnal (decision mode).
+    public var decisionTimeout: TimeInterval
+    /// When true, timeout / app-down → deny instead of defer (fail-closed).
+    public var failClosedOnTimeout: Bool
 
     public static let `default` = HookForwarderOptions()
 
     public init(
         connectTimeout: TimeInterval = HookForwarderCLIOptions.defaultTimeout,
         wrapSource: AgentSource? = nil,
-        defaultSessionId: String? = nil
+        defaultSessionId: String? = nil,
+        decisionTimeout: TimeInterval = HookForwarderOptions.defaultDecisionTimeout,
+        failClosedOnTimeout: Bool = false
     ) {
         // Clamp so downstream EventSocketClient poll/setsockopt never trap on
         // Int32(timeout * 1000) with huge or non-finite values.
@@ -51,6 +61,24 @@ public struct HookForwarderOptions: Sendable, Equatable {
         }
         self.wrapSource = wrapSource
         self.defaultSessionId = defaultSessionId
+        if decisionTimeout.isFinite, decisionTimeout > 0 {
+            self.decisionTimeout = min(decisionTimeout, Self.maxDecisionTimeout)
+        } else {
+            self.decisionTimeout = Self.defaultDecisionTimeout
+        }
+        self.failClosedOnTimeout = failClosedOnTimeout
+    }
+}
+
+/// Result of a decision-mode forward (includes agent stdout body).
+public struct HookForwardDecisionOutcome: Sendable, Equatable {
+    public var forward: HookForwardResult
+    /// Exact JSON to print on stdout for the agent hook (allow / deny / {}).
+    public var stdoutJSON: String
+
+    public init(forward: HookForwardResult, stdoutJSON: String) {
+        self.forward = forward
+        self.stdoutJSON = stdoutJSON
     }
 }
 
@@ -63,54 +91,122 @@ public struct FailOpenHookForwarder: HookForwarding {
     }
 
     public func forward(line: Data, socketPath: URL) -> HookForwardResult {
+        forwardWithDecision(line: line, socketPath: socketPath).forward
+    }
+
+    /// Forward one line; for permission events, waits for Nocturnal UI decision.
+    public func forwardWithDecision(line: Data, socketPath: URL) -> HookForwardDecisionOutcome {
         let trimmed = line.trimmingCRLFPublic
         guard !trimmed.isEmpty else {
-            return HookForwardResult(succeeded: true, detail: "empty line ignored")
+            return HookForwardDecisionOutcome(
+                forward: HookForwardResult(succeeded: true, detail: "empty line ignored"),
+                stdoutJSON: "{}"
+            )
         }
 
-        // Always normalize into a canonical EventEnvelope before socket send.
-        // EventSocket decodes lines as EventEnvelope with soft defaults; sending
-        // raw upstream hook JSON would yield eventType/sessionId "unknown".
         let normalizer = EnvelopeNormalizer(
             defaultSource: options.wrapSource ?? .unknown,
             defaultSessionId: options.defaultSessionId
         )
-        guard let envelope = normalizer.normalize(line: trimmed) else {
-            return HookForwardResult(succeeded: true, detail: "empty after normalize")
+        guard var envelope = normalizer.normalize(line: trimmed) else {
+            return HookForwardDecisionOutcome(
+                forward: HookForwardResult(succeeded: true, detail: "empty after normalize"),
+                stdoutJSON: "{}"
+            )
+        }
+
+        let needsDecision = HookDecisionTranslator.shouldRequestDecision(
+            eventType: envelope.eventType,
+            source: envelope.source,
+            payload: envelope.payload
+        )
+
+        if needsDecision {
+            envelope = HookDecisionTranslator.stampForDecision(
+                envelope,
+                timeoutSec: options.decisionTimeout
+            )
         }
 
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]
         guard let payload = try? encoder.encode(envelope) else {
-            // Fail open for the agent: report write failure, never throw.
-            return HookForwardResult(succeeded: false, detail: "envelope encode failed")
+            return HookForwardDecisionOutcome(
+                forward: HookForwardResult(succeeded: false, detail: "envelope encode failed"),
+                stdoutJSON: failOpenStdout(needsDecision: needsDecision, envelope: envelope)
+            )
         }
 
-        // Stdin may accept up to `defaultMaxBytes`, but normalization embeds the
-        // upstream object in both `payload` and `raw`, so the encoded envelope can
-        // exceed the socket line frame. Reject before send (fail-open, no throw).
         let maxFrameBytes = StdinReader.defaultMaxBytes
-        // sendRawLine appends a trailing newline; the server counts the line body.
         if payload.count > maxFrameBytes {
-            return HookForwardResult(
-                succeeded: false,
-                detail:
-                    "normalized envelope exceeds socket frame limit (\(payload.count) > \(maxFrameBytes) bytes)"
+            return HookForwardDecisionOutcome(
+                forward: HookForwardResult(
+                    succeeded: false,
+                    detail:
+                        "normalized envelope exceeds socket frame limit (\(payload.count) > \(maxFrameBytes) bytes)"
+                ),
+                stdoutJSON: failOpenStdout(needsDecision: needsDecision, envelope: envelope)
             )
+        }
+
+        let client = EventSocketClient(path: socketPath, connectTimeout: options.connectTimeout)
+
+        if needsDecision {
+            do {
+                let reply = try client.sendAndReceiveDecision(
+                    envelope,
+                    receiveTimeout: options.decisionTimeout + 5
+                )
+                var result = reply.result
+                if result.behavior == .defer, options.failClosedOnTimeout {
+                    result = .denied("Nocturnal decision timed out")
+                }
+                let stdout = HookDecisionTranslator.stdoutJSON(for: envelope, result: result)
+                return HookForwardDecisionOutcome(
+                    forward: HookForwardResult(
+                        succeeded: true,
+                        detail: "decision \(result.behavior.rawValue)"
+                    ),
+                    stdoutJSON: stdout
+                )
+            } catch {
+                return HookForwardDecisionOutcome(
+                    forward: HookForwardResult(
+                        succeeded: false,
+                        detail: "decision socket unavailable: \(error.localizedDescription)"
+                    ),
+                    stdoutJSON: failOpenStdout(needsDecision: true, envelope: envelope)
+                )
+            }
         }
 
         do {
-            let client = EventSocketClient(path: socketPath, connectTimeout: options.connectTimeout)
             try client.sendRawLine(payload)
-            return HookForwardResult(succeeded: true, detail: "sent \(payload.count) bytes")
+            return HookForwardDecisionOutcome(
+                forward: HookForwardResult(succeeded: true, detail: "sent \(payload.count) bytes"),
+                stdoutJSON: "{}"
+            )
         } catch {
-            // Fail open: agent continues.
-            return HookForwardResult(
-                succeeded: false,
-                detail: "socket unavailable: \(error.localizedDescription)"
+            return HookForwardDecisionOutcome(
+                forward: HookForwardResult(
+                    succeeded: false,
+                    detail: "socket unavailable: \(error.localizedDescription)"
+                ),
+                stdoutJSON: "{}"
             )
         }
+    }
+
+    private func failOpenStdout(needsDecision: Bool, envelope: EventEnvelope) -> String {
+        guard needsDecision else { return "{}" }
+        if options.failClosedOnTimeout {
+            return HookDecisionTranslator.stdoutJSON(
+                for: envelope,
+                result: .denied("Nocturnal unavailable")
+            )
+        }
+        return "{}"
     }
 
     /// Forward many lines; always aggregates without throwing.

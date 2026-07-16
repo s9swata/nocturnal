@@ -39,6 +39,17 @@ public enum ApprovalRiskHint: String, Codable, Sendable, CaseIterable {
     case unknown
 }
 
+/// How long an approval decision should stick (Nocturnal-local policy).
+///
+/// Agents may ignore this field; Nocturnal records it for UI sticky always-allow
+/// and best-effort sidecar flags only.
+public enum ApprovalScope: String, Codable, Sendable, Hashable {
+    /// Single approval (default when missing on wire).
+    case once
+    /// Always allow this tool name for the remainder of the session (local sticky).
+    case sessionTool
+}
+
 /// Free-form question the agent needs answered before continuing.
 public struct QuestionPrompt: Identifiable, Codable, Sendable, Hashable {
     public var id: String
@@ -89,20 +100,52 @@ public struct ApprovalDecision: Codable, Sendable, Hashable {
     public var sessionId: SessionID
     public var approved: Bool
     public var note: String?
+    /// Sticky scope; `nil` on wire means ``ApprovalScope/once``.
+    public var scope: ApprovalScope?
     public var decidedAt: Date
+
+    /// Effective scope treating missing as `.once`.
+    public var resolvedScope: ApprovalScope { scope ?? .once }
 
     public init(
         requestId: String,
         sessionId: SessionID,
         approved: Bool,
         note: String? = nil,
+        scope: ApprovalScope? = nil,
         decidedAt: Date = Date()
     ) {
         self.requestId = requestId
         self.sessionId = sessionId
         self.approved = approved
         self.note = note
+        self.scope = scope
         self.decidedAt = decidedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case requestId, sessionId, approved, note, scope, decidedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        requestId = try container.decode(String.self, forKey: .requestId)
+        sessionId = try container.decode(SessionID.self, forKey: .sessionId)
+        approved = try container.decode(Bool.self, forKey: .approved)
+        note = try container.decodeIfPresent(String.self, forKey: .note)
+        // Missing scope → once (backward compatible).
+        scope = try container.decodeIfPresent(ApprovalScope.self, forKey: .scope) ?? .once
+        decidedAt = try container.decode(Date.self, forKey: .decidedAt)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(requestId, forKey: .requestId)
+        try container.encode(sessionId, forKey: .sessionId)
+        try container.encode(approved, forKey: .approved)
+        try container.encodeIfPresent(note, forKey: .note)
+        try container.encode(resolvedScope, forKey: .scope)
+        try container.encode(decidedAt, forKey: .decidedAt)
     }
 }
 

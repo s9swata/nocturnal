@@ -10,7 +10,11 @@
 
 | Surface | Status |
 |---------|--------|
-| Floating pill (notch-aware / top-center) | AppKit `NSPanel` non-activating; **capsule-only** chrome (no rect shadow) |
+| Floating pill (notch extension) | AppKit `NSPanel` non-activating; **flush to screen top**; top-flat / bottom-rounded black drip; **verb + detail** live line |
+| Session rows | Age · tool/file stats meta, source chip, jump badge, live subtitle |
+| Approval sheet | Permission banner, monospaced detail, Allow/Deny/Deny+note, **Always allow (session)** local sticky |
+| Timeline | Selected-session `SessionTimelineView` from `recentActivities` |
+| Folders sheet | App Support / sessions / responses / `~/.codex` / `~/.claude` Finder reveals |
 | Expandable session panel | ~520×620 ideal, clamped to visible screen |
 | Session list | Stable `Session.id`, attention-first sort, state badges |
 | Approval / question actions | Wired to `ResponseTransport` + `SessionStore.applyLocalResponse` |
@@ -140,7 +144,11 @@ See `docs/reviews/2026-07-13_ui_vercel-refresh.md`.
 
 **Root cause:** `NSPanel.hasShadow = true` draws a rectangular system shadow around the content rect; any opaque hosting fill compounds the “square margin” look.
 
-**Fix:** clear non-opaque panel, `hasShadow = false`, clear `NSHostingView` layer, SwiftUI capsule fill + capsule shadow only.
+**Fix:** clear non-opaque panel, `hasShadow = false`, clear `NSHostingView` layer, SwiftUI notch-extension fill + bottom shadow only.
+
+## Notch-hug placement
+
+Production geometry (`OverlayGeometry.topCenterFrame(hugTop: true)`) places the panel with `maxY == screenFrame.maxY` (gap 0). Compact content is bottom-weighted inside the panel so labels sit below the physical camera housing while the black fill still merges with the notch.
 
 ---
 

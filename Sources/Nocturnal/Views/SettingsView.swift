@@ -45,12 +45,26 @@ struct SettingsView: View {
 
             Section("Sessions") {
                 Toggle("Floating pill", isOn: pillBinding)
-                    .help("Show a non-activating pill at the top of the screen.")
+                    .help("Show a non-activating notch extension at the top of the screen with live agent activity.")
                     .disabled(!model.isBootstrapped)
                 Stepper(value: maxSessionsBinding, in: 3...40) {
                     Text("Max visible sessions: \(model.settings.maxVisibleSessions)")
                 }
                 .disabled(!model.isBootstrapped)
+            }
+
+            Section {
+                Toggle("Read local agent logs", isOn: readLogsBinding)
+                    .help("Bounded local read of Codex/Claude rollout JSONL for last signal, timeline depth, and tokens/diffs when present. Default on. Local only.")
+                    .disabled(!model.isBootstrapped)
+                Toggle("Scan local listeners", isOn: scanListenersBinding)
+                    .help("Optional discovery of local listening ports for a servers view. Default off.")
+                    .disabled(!model.isBootstrapped)
+            } header: {
+                Text("Enrichment")
+            } footer: {
+                Text("No network. Tokens and diffs appear only when found in hooks or local logs — never invented.")
+                    .font(.caption)
             }
 
             Section("Status") {
@@ -269,6 +283,24 @@ struct SettingsView: View {
             get: { model.settings.maxVisibleSessions },
             set: { value in
                 Task { await model.updateSettings { $0.maxVisibleSessions = value } }
+            }
+        )
+    }
+
+    private var readLogsBinding: Binding<Bool> {
+        Binding(
+            get: { model.settings.readLocalAgentLogs },
+            set: { value in
+                Task { await model.updateSettings { $0.readLocalAgentLogs = value } }
+            }
+        )
+    }
+
+    private var scanListenersBinding: Binding<Bool> {
+        Binding(
+            get: { model.settings.scanLocalListeners },
+            set: { value in
+                Task { await model.updateSettings { $0.scanLocalListeners = value } }
             }
         )
     }

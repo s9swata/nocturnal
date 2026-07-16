@@ -22,14 +22,17 @@ enum NocturnalPalette {
     static let accentSuccess = Color(red: 0.42, green: 0.58, blue: 0.44)
     /// Low-contrast neutral hairline.
     static let borderSubtle = Color(red: 0.22, green: 0.22, blue: 0.22) // #383838
-    /// Pill fill over desktop.
+    /// Pill fill over desktop (legacy elevated).
     static let pillFill = Color(red: 0.06, green: 0.06, blue: 0.06) // #0F0F0F
+    /// Notch-extension fill — matches physical camera housing black.
+    static let notchFill = Color.black
 }
 
 /// UI layout tokens. Overlay panel/pill sizes are owned by ``OverlayGeometry``.
 enum NocturnalLayout {
-    static let pillWidth: CGFloat = OverlayGeometry.compactWidth
-    static let pillHeight: CGFloat = OverlayGeometry.compactHeight
+    /// Baseline live-compact island size (modes override via ``OverlayGeometry/islandSize(for:)``).
+    static let pillWidth: CGFloat = OverlayGeometry.islandSize(for: .liveCompact).width
+    static let pillHeight: CGFloat = OverlayGeometry.islandSize(for: .liveCompact).height
     /// Expanded overlay target width (clamped to visible screen).
     static let panelWidth: CGFloat = OverlayGeometry.idealExpandedWidth
     /// Expanded overlay target height (clamped to visible screen).

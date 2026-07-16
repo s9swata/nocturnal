@@ -12,27 +12,31 @@ struct OverlayGeometryTests {
 
     // MARK: - Compact / expanded targets (production policy)
 
-    /// Compact size is a fixed pill — independent of the visible frame (must not
-    /// grow toward empty-state intrinsic ~225×218 or expand with screen size).
-    @Test func compactTargetSizeIsIndependentOfVisibleFrame() {
+    /// Compact island stays a drip (not a panel); width may clamp on tiny screens.
+    @Test func compactTargetSizeStaysIslandFootprint() {
         let frames = [
             CGRect(x: 0, y: 0, width: 320, height: 480),
             CGRect(x: 0, y: 0, width: 1440, height: 900),
             CGRect(x: 0, y: 0, width: 3024, height: 1964),
         ]
-        let expected = OverlayGeometry.compactSize
         for visible in frames {
             let size = OverlayGeometry.targetSize(expanded: false, visibleFrame: visible)
-            #expect(size == expected)
-            // Pill discipline: fixed compact chrome, never a card/panel footprint.
-            #expect(size.width < OverlayGeometry.idealExpandedWidth / 2)
-            #expect(size.height < 48)
-            #expect(size.width > 120)
+            // Pill discipline: island chrome, never a card/panel footprint.
+            #expect(size.width < OverlayGeometry.idealExpandedWidth * 0.6)
+            #expect(size.height < 64)
+            #expect(size.width >= OverlayGeometry.islandMinWidth - 1)
             #expect(size.height > 24)
-            // Must stay narrower than clamped expanded floors so compact never
-            // masquerades as a small expanded panel.
             #expect(size.height < OverlayGeometry.minExpandedHeight)
         }
+        // Normal laptop: full liveCompact width.
+        let laptop = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        #expect(
+            OverlayGeometry.targetSize(
+                expanded: false,
+                visibleFrame: laptop,
+                islandMode: .liveCompact
+            ) == OverlayGeometry.islandSize(for: .liveCompact)
+        )
     }
 
     @Test func expandedTargetUsesClampPolicyOnSmallScreens() {
@@ -44,7 +48,7 @@ struct OverlayGeometryTests {
     }
 
     @Test func targetSizePicksCompactOrClampedExpanded() {
-        let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let visible = CGRect(x: 0, y: 0, width: 1440, height: 875)
         #expect(OverlayGeometry.targetSize(expanded: false, visibleFrame: visible)
             == OverlayGeometry.compactSize)
         #expect(OverlayGeometry.targetSize(expanded: true, visibleFrame: visible)
@@ -95,9 +99,9 @@ struct OverlayGeometryTests {
         #expect(size.height >= OverlayGeometry.minExpandedHeight)
     }
 
-    // MARK: - Placement (production top-center policy)
+    // MARK: - Placement (notch-hug production policy)
 
-    @Test func topCenterPlacesCompactBelowMenuBar() {
+    @Test func notchHugPlacesCompactFlushToScreenTop() {
         let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
         let visible = CGRect(x: 0, y: 0, width: 1440, height: 875) // 25pt menu bar
         let size = OverlayGeometry.compactSize
@@ -106,78 +110,83 @@ struct OverlayGeometryTests {
             screenFrame: screen,
             visibleFrame: visible,
             safeAreaTop: 0,
-            gap: 6
+            gap: 0,
+            hugTop: true
         )
         #expect(frame.size == size)
-        #expect(abs(frame.midX - visible.midX) < 0.5)
-        let menuBarHeight = screen.maxY - visible.maxY
-        let expectedMaxY = screen.maxY - menuBarHeight - 6
-        #expect(abs(frame.maxY - expectedMaxY) < 0.5)
-        #expect(frame.minX >= visible.minX)
-        #expect(frame.maxX <= visible.maxX)
-        // Production clamp: never above visible maxY - height - 4.
-        #expect(frame.maxY <= visible.maxY - 4 + 0.5)
-        #expect(frame.minY >= visible.minY + OverlayGeometry.screenEdgeInset - 0.5)
+        #expect(abs(frame.midX - screen.midX) < 0.5)
+        // Flush to absolute top — extends through the menu-bar / notch band.
+        #expect(abs(frame.maxY - screen.maxY) < 0.5)
+        #expect(abs(frame.minY - (screen.maxY - size.height)) < 0.5)
     }
 
-    @Test func topCenterHonorsNotchSafeArea() {
+    @Test func notchHugIgnoresSafeAreaTop() {
         let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
         let visible = CGRect(x: 0, y: 0, width: 1512, height: 945)
-        let size = OverlayGeometry.idealExpandedSize
-        let safeTop: CGFloat = 37 // notch > menu bar remainder
+        let size = OverlayGeometry.compactSize
+        let safeTop: CGFloat = 37
         let frame = OverlayGeometry.topCenterFrame(
             size: size,
             screenFrame: screen,
             visibleFrame: visible,
             safeAreaTop: safeTop,
-            gap: 6
+            gap: 0,
+            hugTop: true
         )
-        #expect(frame.size == size)
-        let expectedMaxY = screen.maxY - safeTop - 6
-        #expect(abs(frame.maxY - expectedMaxY) < 0.5)
+        // Safe area must not push the extension below the notch.
+        #expect(abs(frame.maxY - screen.maxY) < 0.5)
     }
 
-    /// When computed Y would place the panel above the visible area, production
-    /// clamp `min(y, visibleFrame.maxY - size.height - 4)` pulls it down.
-    @Test func topCenterClampsYWhenPanelWouldOverflowVisibleTop() {
-        let screen = CGRect(x: 0, y: 0, width: 800, height: 600)
-        // Tiny visible band near bottom — large panel cannot sit at menu-bar Y.
-        let visible = CGRect(x: 0, y: 0, width: 800, height: 200)
-        let size = CGSize(width: 228, height: 180)
+    @Test func expandedAlsoHugsScreenTop() {
+        let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let visible = CGRect(x: 0, y: 0, width: 1440, height: 875)
+        let size = OverlayGeometry.targetSize(expanded: true, visibleFrame: visible)
         let frame = OverlayGeometry.topCenterFrame(
             size: size,
             screenFrame: screen,
             visibleFrame: visible,
             safeAreaTop: 0,
-            gap: 6
+            hugTop: true
         )
-        #expect(frame.maxY <= visible.maxY - 4 + 0.5)
-        #expect(frame.minY >= visible.minY + OverlayGeometry.screenEdgeInset - 0.5)
-        #expect(frame.height == size.height)
+        #expect(frame.size == OverlayGeometry.idealExpandedSize)
+        #expect(abs(frame.maxY - screen.maxY) < 0.5)
+        #expect(frame.width > OverlayGeometry.minExpandedWidth)
+        #expect(frame.height > OverlayGeometry.minExpandedHeight)
     }
 
-    @Test func topCenterClampsHorizontallyOnNarrowVisibleFrame() {
-        let screen = CGRect(x: 0, y: 0, width: 400, height: 700)
-        let visible = CGRect(x: 0, y: 0, width: 400, height: 670)
-        let size = CGSize(width: 380, height: 500)
+    @Test func legacyBelowChromePlacementStillWorks() {
+        let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let visible = CGRect(x: 0, y: 0, width: 1440, height: 875)
+        let size = OverlayGeometry.compactSize
         let frame = OverlayGeometry.topCenterFrame(
             size: size,
             screenFrame: screen,
             visibleFrame: visible,
             safeAreaTop: 0,
             gap: 6,
+            hugTop: false
+        )
+        let menuBarHeight = screen.maxY - visible.maxY
+        let expectedMaxY = screen.maxY - menuBarHeight - 6
+        #expect(abs(frame.maxY - expectedMaxY) < 0.5)
+    }
+
+    @Test func notchHugClampsHorizontallyOnNarrowScreen() {
+        let screen = CGRect(x: 0, y: 0, width: 400, height: 700)
+        let size = CGSize(width: 380, height: 38)
+        let frame = OverlayGeometry.notchHugFrame(
+            size: size,
+            screenFrame: screen,
+            gap: 0,
             edgeInset: OverlayGeometry.screenEdgeInset
         )
-        #expect(frame.minX >= visible.minX + OverlayGeometry.screenEdgeInset - 0.5)
-        #expect(frame.maxX <= visible.maxX - OverlayGeometry.screenEdgeInset + 0.5)
-        #expect(frame.size == size)
+        #expect(frame.minX >= screen.minX + OverlayGeometry.screenEdgeInset - 0.5)
+        #expect(frame.maxX <= screen.maxX - OverlayGeometry.screenEdgeInset + 0.5)
+        #expect(abs(frame.maxY - screen.maxY) < 0.5)
     }
 
     // MARK: - Host layout policy (crash-prevention contract)
 
-    /// Production must pass empty `NSHostingSizingOptions` so the panel is not
-    /// resized by intrinsic empty-state content and cannot enter the
-    /// `updateAnimatedWindowSize` → constraint-pass NSGenericException loop.
     @Test func hostLayoutPolicyDisablesAutomaticWindowSizing() {
         #expect(
             OverlayHostLayoutPolicy.isAutomaticWindowSizingDisabled(
@@ -203,7 +212,6 @@ struct OverlayGeometryTests {
                 hostingLayerIsClear: OverlayHostLayoutPolicy.hostingLayerIsClear
             )
         )
-        // Shadow on fails the contract (rectangular system halo).
         #expect(
             !OverlayHostLayoutPolicy.matchesProductionContract(
                 sizingOptionsRawValue: 0,
@@ -214,7 +222,6 @@ struct OverlayGeometryTests {
                 hostingLayerIsClear: true
             )
         )
-        // Non-empty sizing options fails the contract (constraint-cycle crash path).
         #expect(
             !OverlayHostLayoutPolicy.matchesProductionContract(
                 sizingOptionsRawValue: 1,
@@ -225,7 +232,6 @@ struct OverlayGeometryTests {
                 hostingLayerIsClear: true
             )
         )
-        // Missing autoresizing fails the contract (content won't track panel content rect).
         #expect(
             !OverlayHostLayoutPolicy.matchesProductionContract(
                 sizingOptionsRawValue: 0,
@@ -236,21 +242,5 @@ struct OverlayGeometryTests {
                 hostingLayerIsClear: true
             )
         )
-    }
-
-    @Test func expandedFrameOn1440MatchesAuthoritativeSize() {
-        let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
-        let visible = CGRect(x: 0, y: 0, width: 1440, height: 875)
-        let size = OverlayGeometry.targetSize(expanded: true, visibleFrame: visible)
-        let frame = OverlayGeometry.topCenterFrame(
-            size: size,
-            screenFrame: screen,
-            visibleFrame: visible,
-            safeAreaTop: 0
-        )
-        #expect(frame.size == OverlayGeometry.idealExpandedSize)
-        // Must not collapse toward empty-state intrinsic (~225×218).
-        #expect(frame.width > OverlayGeometry.minExpandedWidth)
-        #expect(frame.height > OverlayGeometry.minExpandedHeight)
     }
 }

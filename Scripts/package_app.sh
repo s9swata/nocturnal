@@ -208,9 +208,15 @@ fi
 # Runtime source of truth: Sources/Nocturnal/Resources/Brand.
 BRAND_DEST="$APP/Contents/Resources/Brand"
 mkdir -p "$BRAND_DEST"
-# Clear any prior contents so only the two production files remain.
 rm -rf "${BRAND_DEST:?}/"*
-BRAND_PRODUCTION_PNGS=(nocturnal-app-icon.png nocturnal-owl-mark.png)
+# Core marks + monochrome agent product icons (Codex/Claude/OpenCode).
+BRAND_PRODUCTION_PNGS=(
+  nocturnal-app-icon.png
+  nocturnal-owl-mark.png
+  agent-openai.png
+  agent-claude.png
+  agent-opencode.png
+)
 for name in "${BRAND_PRODUCTION_PNGS[@]}"; do
   if [[ -f "$ROOT/Sources/Nocturnal/Resources/Brand/$name" ]]; then
     cp "$ROOT/Sources/Nocturnal/Resources/Brand/$name" "$BRAND_DEST/$name"
@@ -221,9 +227,10 @@ for name in "${BRAND_PRODUCTION_PNGS[@]}"; do
     exit 1
   fi
 done
+EXPECTED_BRAND_COUNT=${#BRAND_PRODUCTION_PNGS[@]}
 BRAND_COUNT=$(find "$BRAND_DEST" -type f | wc -l | tr -d ' ')
-if [[ "$BRAND_COUNT" -ne 2 ]]; then
-  echo "ERROR: Resources/Brand must contain exactly 2 production PNGs, found ${BRAND_COUNT}:" >&2
+if [[ "$BRAND_COUNT" -ne "$EXPECTED_BRAND_COUNT" ]]; then
+  echo "ERROR: Resources/Brand must contain exactly ${EXPECTED_BRAND_COUNT} production PNGs, found ${BRAND_COUNT}:" >&2
   ls -la "$BRAND_DEST" >&2
   exit 1
 fi

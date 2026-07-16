@@ -22,6 +22,8 @@ struct SessionStateTests {
         ("Codex", AgentSource.codex),
         ("Claude-Code", AgentSource.claude),
         ("claude", AgentSource.claude),
+        ("opencode", AgentSource.opencode),
+        ("OpenCode", AgentSource.opencode),
         ("demo", AgentSource.unknown),
         ("nocturnal-demo", AgentSource.unknown),
         ("something-else", AgentSource.unknown),

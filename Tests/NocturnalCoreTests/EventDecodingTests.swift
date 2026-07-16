@@ -321,4 +321,29 @@ struct EventDecodingTests {
         #expect(ClaudeEventDecoder.implementedEventTypes.contains("SessionStart"))
         #expect(ClaudeEventDecoder.implementedEventTypes.contains("PreToolUse"))
     }
+
+    @Test func codexNativeLifecycleFixtureMapsWithExplicitSource() throws {
+        let lines = try TestSupport.fixtureLines(
+            relativePath: "codex/native-lifecycle-0.144.1.ndjson"
+        )
+        let normalizer = EnvelopeNormalizer(defaultSource: .codex)
+        let decoder = CodexEventDecoder()
+        let events = try lines.map { line in
+            try #require(normalizer.normalize(line: line))
+        }
+        #expect(events.map(\.eventType) == ["SessionStart", "PermissionRequest", "Stop"])
+        #expect(events.allSatisfy { $0.source == .codex })
+
+        let started = decoder.decode(events[0])
+        #expect(started.state == .running)
+        #expect(started.workingDirectory == "/tmp/nocturnal-project")
+
+        let permission = decoder.decode(events[1])
+        #expect(permission.state == .waitingForApproval)
+        #expect(permission.approval?.id == "tool-42")
+        #expect(permission.approval?.toolName == "shell")
+
+        let stopped = decoder.decode(events[2])
+        #expect(stopped.state == .idle)
+    }
 }

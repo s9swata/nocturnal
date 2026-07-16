@@ -17,11 +17,11 @@ Nocturnal is a **local-first** macOS 14+ companion for AI coding agents (Codex, 
 | **NocturnalCore** | Library | Models, `SessionStore` actor, socket bridge, decoders, persistence, jump-back, response transport, hook install helpers |
 | **Nocturnal** | Executable app | SwiftUI shell (`MenuBarExtra`, Settings, window), `@Observable` `AppModel`, AppKit overlay host |
 | **nocturnal-hook-forwarder** | CLI | Fail-open stdin → socket |
-| **nocturnal-setup** | CLI | Idempotent install/uninstall of managed hook sidecars |
+| **nocturnal-setup** | CLI | Idempotent native hook install, Doctor, repair, and uninstall |
 | **NocturnalCoreTests** | Tests | Swift Testing coverage for core contracts |
 
 ```
-Agent hooks ──► nocturnal-hook-forwarder ──► Unix socket (NDJSON)
+Codex/Claude native hooks ─► nocturnal-hook-forwarder ─► Unix socket (NDJSON)
                                               │
                                               ▼
                                          EventSocketServer
@@ -33,6 +33,8 @@ Agent hooks ──► nocturnal-hook-forwarder ──► Unix socket (NDJSON)
                               ▼               ▼               ▼
                          Persistence     AppModel (@MainActor)  Response files
                          (JSON)          SwiftUI / Overlay
+
+Codex local sessions/session_meta ── bounded read-only catch-up ──► SessionStore
 ```
 
 ## Concurrency boundaries
@@ -71,16 +73,31 @@ Config sandbox for setup tests: `NOCTURNAL_CONFIG_ROOT`.
 
 ## Hook install model
 
-`nocturnal-setup` writes **Nocturnal-managed sidecar** files under:
+By default, `nocturnal-setup` merges nested command handlers into the files the
+agents actually consume:
+
+- `CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`)
+- `~/.claude/settings.json`
+
+It also writes Nocturnal-managed descriptors under:
 
 - `$NOCTURNAL_CONFIG_ROOT/.codex/nocturnal-hooks.json` (default `~/.codex/…`)
 - `$NOCTURNAL_CONFIG_ROOT/.claude/nocturnal-hooks.json`
 
-Install is **idempotent**, creates **timestamped backups**, and never rewrites unrelated user config in the MVP scaffold. Product-specific full config merge is a core follow-up (documented as open contract).
+Install is **idempotent**, creates **timestamped backups**, and preserves valid
+foreign lifecycle groups/handlers. Codex ownership is recognized by the nested
+`nocturnal-hook-forwarder` command because unknown top-level marker fields are
+rejected by Codex. `doctor` performs a read-only structural check and reports the
+installed Codex version; `repair` migrates the obsolete Nocturnal array schema.
+
+At app bootstrap, a bounded scanner reads only the first `session_meta` line of up
+to 100 recent local Codex JSONL files. This creates idle recovery stubs; native
+hooks remain authoritative for live state. The scanner never parses prompts,
+responses, or tool transcript bodies.
 
 ## Response transport
 
-User approvals / answers become JSON under `responses/` (`ResponseFileEnvelope`). Future agents/plugins can watch this directory; a reply socket may be added without changing the public `ResponseTransporting` protocol.
+User approvals / answers become JSON under `responses/` (`ResponseFileEnvelope`) **and**, for `PermissionRequest` (decision mode), complete an in-process `PermissionBroker` so the blocked `nocturnal-hook-forwarder` can print Codex/Claude allow/deny JSON on stdout. If Nocturnal is down or the user times out, the forwarder prints `{}` (fail-open → agent’s own prompt).
 
 ## Jump-back
 

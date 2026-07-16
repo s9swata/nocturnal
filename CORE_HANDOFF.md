@@ -2,7 +2,7 @@
 
 **Author:** nocturnal-core  
 **Date:** 2026-07-13  
-**Status:** Production MVP + review-fix pass; `swift test` green (156 tests).
+**Status:** Production MVP + P0 Core stats/always-allow; `swift test` green (185 tests).
 
 ---
 
@@ -87,12 +87,27 @@ Core regressions: `settingsSaveRefusesToOverwriteNewerSchema`, `settingsUpdateRe
 
 ### Key models (all `Sendable`)
 
-- `Session`, `SessionID`, `SessionState`, `AgentSource`
+- `Session`, `SessionID`, `SessionState`, `AgentSource`, `SessionStats`
+- `SessionActivity`, `SessionActivityKind`
 - `EventEnvelope`, `JSONValue`
-- `ApprovalRequest`, `QuestionPrompt`, `AgentResponse`, `ApprovalDecision`, `QuestionAnswer`
+- `ApprovalRequest`, `QuestionPrompt`, `AgentResponse`, `ApprovalDecision`, `ApprovalScope`, `QuestionAnswer`
 - `JumpBackContext`, `JumpBackResult`
 - `AppSettings`, `SessionStoreSnapshot`, `SessionStorePolicy`
 - `HookInstallResult`, `HookProduct`, `HookInstallMode`
+
+### Session stats + always-allow (P0 Core, 2026-07-16)
+
+| Field / API | Notes |
+|-------------|--------|
+| `Session.stats: SessionStats` | `toolUseCount`, `filesTouchedCount`, `touchedPathKeys` (cap 32), `lastToolName`. Missing JSON → `.empty`. |
+| `Session.sessionAlwaysAllowTools: Set<String>` | Local sticky tools; Codable as sorted `[String]`; missing → `[]`. Keys normalized (`trim` + `lowercased`). |
+| Stats update rule | **PreToolUse only** increments `toolUseCount` / sets `lastToolName`; path from `file_path`/`filePath`/`path`/`filepath` (top-level or `tool_input`). PostToolUse does **not** double-count tools (may still fill a path). Unknown / approval / lifecycle: no invented stats. |
+| `ApprovalDecision.scope: ApprovalScope?` | `.once` (default) \| `.sessionTool`. Wire missing → `.once`. |
+| `SessionStore.applyLocalResponse` | On `approved && resolvedScope == .sessionTool`, inserts normalized tool name from **pending** approval into `sessionAlwaysAllowTools`. Deny does not sticky. Store does **not** auto-write transport. |
+| `FileResponseTransport` sidecars | Additive `"scope"` + existing `"note"` on codex/claude approval JSON. Envelope encodes full `ApprovalDecision`. |
+| Presentation helpers | `Session.ageDescription`, `Session.statsMetaLine` (`"4 tools · 2 files"` or nil); `SessionActivity.verbToken`, `SessionActivity.durationDescription`. |
+
+**UI contract for always-allow:** AppModel should observe sticky set and, when a new `pendingApproval.toolName` is in the set, call existing approve path with transport write. Status copy must say **local** always-allow — never claim the agent honored the sidecar.
 
 ### Implemented event types
 

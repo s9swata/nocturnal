@@ -1,0 +1,3 @@
+{"v":1,"id":"bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeee1","source":"opencode","eventType":"session.created","sessionId":"oc-native-1","timestamp":"2026-07-16T13:00:00.000Z","payload":{"cwd":"/tmp/project","title":"Native bus"},"raw":{"type":"session.created"}}
+{"v":1,"id":"bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeee2","source":"opencode","eventType":"tool.execute.before","sessionId":"oc-native-1","timestamp":"2026-07-16T13:00:01.000Z","payload":{"tool":"edit","args":{"filePath":"/tmp/project/main.go"}},"raw":{}}
+{"v":1,"id":"bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeee3","source":"opencode","eventType":"session.idle","sessionId":"oc-native-1","timestamp":"2026-07-16T13:00:05.000Z","payload":{},"raw":{}}
