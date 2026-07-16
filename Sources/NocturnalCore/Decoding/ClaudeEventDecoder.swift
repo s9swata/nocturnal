@@ -146,6 +146,13 @@ public struct ClaudeEventDecoder: EventDecoding, Sendable {
             }
         case "tool.approval_resolved":
             result.clearApproval = true
+            result.resolvedApprovalId = EventDecodeHelpers.string(
+                payload,
+                "tool_use_id",
+                "toolUseId",
+                "request_id",
+                "id"
+            )
             result.state = .running
         case "Notification":
             result.state = nil // summary only
@@ -169,6 +176,12 @@ public struct ClaudeEventDecoder: EventDecoding, Sendable {
             result.state = .waitingForInput
         case "agent.question_answered":
             result.clearQuestion = true
+            result.resolvedQuestionId = EventDecodeHelpers.string(
+                payload,
+                "prompt_id",
+                "id",
+                "request_id"
+            )
             result.state = .running
         default:
             result.isUnknown = true

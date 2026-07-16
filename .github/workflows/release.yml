@@ -175,8 +175,8 @@ jobs:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: Nocturnal ${{ steps.ver.outputs.version }}
           # Tag pushes always open as draft so you can review before publish.
-          # Manual runs honor the draft_release input.
-          draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft_release || true }}
+          # Manual runs honor the draft_release input (including draft_release: false).
+          draft: ${{ github.event_name != 'workflow_dispatch' || inputs.draft_release }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |

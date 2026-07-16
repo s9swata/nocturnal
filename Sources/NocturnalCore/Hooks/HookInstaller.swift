@@ -951,11 +951,33 @@ public struct HookInstaller: Sendable {
             } else {
                 backupPath = "(dry-run backup)"
             }
-            if let data = try? Data(contentsOf: url),
-               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            {
-                root = obj
+            // Existing hooks.json that cannot be parsed as an object with a hooks
+            // map is a safe failure — never replace a schema-shifted file with a
+            // Nocturnal-only root (backup already taken above when not dry-run).
+            guard let data = try? Data(contentsOf: url) else {
+                throw HookInstallerError.nativeConfigUnreadable(
+                    product: .cursor,
+                    path: url.path,
+                    reason: "Could not read existing hooks.json"
+                )
             }
+            guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            else {
+                throw HookInstallerError.nativeConfigUnreadable(
+                    product: .cursor,
+                    path: url.path,
+                    reason: "Existing hooks.json is not a JSON object; refusing to overwrite"
+                )
+            }
+            // hooks must be absent (we create it) or an object/map — not an array/string.
+            if let hooksValue = obj["hooks"], !(hooksValue is [String: Any]) {
+                throw HookInstallerError.nativeConfigUnreadable(
+                    product: .cursor,
+                    path: url.path,
+                    reason: "Existing hooks.json has a non-object \"hooks\" value; refusing to overwrite"
+                )
+            }
+            root = obj
         }
 
         if root["version"] == nil {
@@ -1410,6 +1432,7 @@ public struct HookInstaller: Sendable {
 public enum HookInstallerError: Error, Sendable, Equatable, LocalizedError {
     case invalidCodexHooks(String)
     case missingOpenCodePluginTemplate
+    case nativeConfigUnreadable(product: HookProduct, path: String, reason: String)
 
     public var errorDescription: String? {
         switch self {
@@ -1417,6 +1440,8 @@ public enum HookInstallerError: Error, Sendable, Equatable, LocalizedError {
             return "Cannot safely repair Codex hooks: \(detail)"
         case .missingOpenCodePluginTemplate:
             return "OpenCode plugin template missing from NocturnalCore resources (OpenCodeBridge.plugin.js)"
+        case .nativeConfigUnreadable(let product, let path, let reason):
+            return "Cannot install \(product.rawValue) hooks at \(path): \(reason)"
         }
     }
 }

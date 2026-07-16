@@ -137,10 +137,6 @@ struct QuietSessionsHiddenView: View {
     @Bindable var model: AppModel
     var style: SessionPanelStyle
 
-    private var hiddenCount: Int {
-        max(model.quietSessionCount, model.recoveryStubCount)
-    }
-
     private var hiddenLabel: String {
         if model.recoveryStubCount > 0, model.quietSessionCount == model.recoveryStubCount {
             let n = model.recoveryStubCount
@@ -176,9 +172,7 @@ struct QuietSessionsHiddenView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(NocturnalLayout.contentPadding)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            "No live sessions. \(hiddenCount) quiet \(hiddenCount == 1 ? "session" : "sessions") hidden."
-        )
+        .accessibilityLabel("No live sessions. \(hiddenLabel) so the list stays useful.")
     }
 }
 

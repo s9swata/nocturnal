@@ -205,14 +205,53 @@ public actor SessionStore {
     @discardableResult
     public func apply(_ envelope: EventEnvelope) async -> Session {
         var decoded = decoder.decode(envelope)
-        // NAP attention resolution: clear pending UI even when a product decoder
-        // only understands native aliases (tool.approval_resolved).
+        // NAP attention: normalize before product-specific gaps leave approvals as
+        // generic activity. Also clear pending UI for native resolution aliases.
         let nap = CanonicalAgentEvent.normalize(envelope.eventType)
+        let payload = decoded.activityPayload ?? envelope.payload
+        if nap == CanonicalAgentEvent.permissionAsked.rawValue, decoded.approval == nil {
+            decoded.approval = Self.synthesizeApproval(
+                from: payload,
+                sessionId: envelope.sessionId,
+                envelopeId: envelope.id,
+                at: envelope.timestamp
+            )
+            decoded.state = .waitingForApproval
+            decoded.isUnknown = false
+        }
+        if nap == CanonicalAgentEvent.questionAsked.rawValue, decoded.question == nil {
+            decoded.question = Self.synthesizeQuestion(
+                from: payload,
+                sessionId: envelope.sessionId,
+                envelopeId: envelope.id,
+                at: envelope.timestamp
+            )
+            decoded.state = .waitingForInput
+            decoded.isUnknown = false
+        }
         if nap == CanonicalAgentEvent.permissionResolved.rawValue {
             decoded.clearApproval = true
+            if decoded.resolvedApprovalId == nil {
+                decoded.resolvedApprovalId = EventDecodeHelpers.string(
+                    payload,
+                    "request_id",
+                    "tool_use_id",
+                    "toolUseId",
+                    "approval_id",
+                    "id"
+                )
+            }
         }
         if nap == CanonicalAgentEvent.questionAnswered.rawValue {
             decoded.clearQuestion = true
+            if decoded.resolvedQuestionId == nil {
+                decoded.resolvedQuestionId = EventDecodeHelpers.string(
+                    payload,
+                    "prompt_id",
+                    "request_id",
+                    "id"
+                )
+            }
         }
         if decoded.isUnknown {
             unknownEventCount &+= 1
@@ -316,15 +355,32 @@ public actor SessionStore {
                 session.state = .waitingForInput
             }
             if decoded.clearApproval {
-                session.pendingApproval = nil
-                if session.state == .waitingForApproval {
-                    session.state = decoded.state ?? .running
+                // Late resolutions must not dismiss a newer pending request.
+                let matches: Bool = {
+                    guard let rid = decoded.resolvedApprovalId, !rid.isEmpty else {
+                        return true
+                    }
+                    return session.pendingApproval?.id == rid
+                }()
+                if matches {
+                    session.pendingApproval = nil
+                    if session.state == .waitingForApproval {
+                        session.state = decoded.state ?? .running
+                    }
                 }
             }
             if decoded.clearQuestion {
-                session.pendingQuestion = nil
-                if session.state == .waitingForInput {
-                    session.state = decoded.state ?? .running
+                let matches: Bool = {
+                    guard let rid = decoded.resolvedQuestionId, !rid.isEmpty else {
+                        return true
+                    }
+                    return session.pendingQuestion?.id == rid
+                }()
+                if matches {
+                    session.pendingQuestion = nil
+                    if session.state == .waitingForInput {
+                        session.state = decoded.state ?? .running
+                    }
                 }
             }
         }
@@ -354,7 +410,11 @@ public actor SessionStore {
             session.rawMetadata["sourceRaw"] = .string(sourceRaw)
         }
 
-        session.lastEventType = envelope.eventType
+        // Stale envelopes must not replace recovery / live lastEventType — otherwise
+        // a delayed hook can clear isRecoveryStub on a recovered row.
+        if !isStaleEvent {
+            session.lastEventType = envelope.eventType
+        }
         // Never move updatedAt backwards.
         if envelope.timestamp >= session.updatedAt {
             session.updatedAt = envelope.timestamp
@@ -641,8 +701,14 @@ public struct DecodedEvent: Sendable, Equatable {
     public var question: QuestionPrompt?
     public var clearApproval: Bool
     public var clearQuestion: Bool
+    /// When set, ``clearApproval`` only applies if it matches ``Session/pendingApproval``.
+    public var resolvedApprovalId: String?
+    /// When set, ``clearQuestion`` only applies if it matches ``Session/pendingQuestion``.
+    public var resolvedQuestionId: String?
     public var jumpBack: JumpBackContext?
     public var extraMetadata: [String: JSONValue]
+    /// Decoder-enriched payload for activity mapping (tool aliases, merged raw keys).
+    public var activityPayload: [String: JSONValue]?
     /// True when the event type is not in the implemented schema set.
     public var isUnknown: Bool
 
@@ -656,8 +722,11 @@ public struct DecodedEvent: Sendable, Equatable {
         question: QuestionPrompt? = nil,
         clearApproval: Bool = false,
         clearQuestion: Bool = false,
+        resolvedApprovalId: String? = nil,
+        resolvedQuestionId: String? = nil,
         jumpBack: JumpBackContext? = nil,
         extraMetadata: [String: JSONValue] = [:],
+        activityPayload: [String: JSONValue]? = nil,
         isUnknown: Bool = false
     ) {
         self.inferredSource = inferredSource
@@ -669,8 +738,64 @@ public struct DecodedEvent: Sendable, Equatable {
         self.question = question
         self.clearApproval = clearApproval
         self.clearQuestion = clearQuestion
+        self.resolvedApprovalId = resolvedApprovalId
+        self.resolvedQuestionId = resolvedQuestionId
         self.jumpBack = jumpBack
         self.extraMetadata = extraMetadata
+        self.activityPayload = activityPayload
         self.isUnknown = isUnknown
+    }
+}
+
+extension SessionStore {
+    fileprivate static func synthesizeApproval(
+        from payload: [String: JSONValue],
+        sessionId: String,
+        envelopeId: UUID,
+        at: Date
+    ) -> ApprovalRequest {
+        let requestId = EventDecodeHelpers.string(
+            payload,
+            "request_id",
+            "tool_use_id",
+            "toolUseId",
+            "approval_id",
+            "id"
+        ) ?? envelopeId.uuidString
+        let tool = EventDecodeHelpers.string(payload, "tool_name", "tool", "name") ?? "tool"
+        let summary = EventDecodeHelpers.string(payload, "summary", "description", "message")
+            ?? "Approve \(tool)?"
+        let detail = EventDecodeHelpers.string(payload, "detail", "command", "input")
+        return ApprovalRequest(
+            id: requestId,
+            sessionId: SessionID(sessionId),
+            toolName: tool,
+            summary: summary,
+            detail: detail,
+            createdAt: at,
+            raw: payload
+        )
+    }
+
+    fileprivate static func synthesizeQuestion(
+        from payload: [String: JSONValue],
+        sessionId: String,
+        envelopeId: UUID,
+        at: Date
+    ) -> QuestionPrompt {
+        let promptId = EventDecodeHelpers.string(payload, "id", "prompt_id", "request_id")
+            ?? envelopeId.uuidString
+        let prompt = EventDecodeHelpers.string(payload, "prompt", "question", "message")
+            ?? "Agent needs input"
+        return QuestionPrompt(
+            id: promptId,
+            sessionId: SessionID(sessionId),
+            prompt: prompt,
+            placeholder: EventDecodeHelpers.string(payload, "placeholder"),
+            choices: EventDecodeHelpers.stringArray(payload["choices"]),
+            allowFreeform: EventDecodeHelpers.bool(payload, "allow_freeform") ?? true,
+            createdAt: at,
+            raw: payload
+        )
     }
 }

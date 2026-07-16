@@ -64,6 +64,8 @@ public struct GrokEventDecoder: EventDecoding, Sendable {
 
         let payload = Self.enrichedPayload(envelope)
         var result = DecodedEvent(inferredSource: .grokBuild, isUnknown: false)
+        // Propagate enrichment so activity mapping sees tool names/paths from raw-only stdin.
+        result.activityPayload = payload
 
         result.titleHint = EventDecodeHelpers.string(
             payload,

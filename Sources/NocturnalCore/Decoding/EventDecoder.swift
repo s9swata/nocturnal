@@ -357,15 +357,17 @@ public struct EnvelopeNormalizer: Sendable {
             if ClaudeEventDecoder.implementedEventTypes.contains(eventType) {
                 return .claude
             }
+            // Prefer Codex over Grok for shared NAP names (e.g. session.reconciled)
+            // so source-less recovery envelopes keep historical Codex identity.
+            if CodexEventDecoder.implementedEventTypes.contains(eventType) {
+                return .codex
+            }
             if GrokEventDecoder.implementedEventTypes.contains(eventType)
                 || GrokEventDecoder.implementedEventTypes.contains(
                     GrokEventDecoder.normalizeEventType(eventType)
                 )
             {
                 return .grokBuild
-            }
-            if CodexEventDecoder.implementedEventTypes.contains(eventType) {
-                return .codex
             }
             return .unknown
         }()

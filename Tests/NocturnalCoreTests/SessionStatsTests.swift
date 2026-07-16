@@ -229,8 +229,8 @@ struct SessionStatsTests {
             command: "npm test",
             integration: .shell
         )
-        // Humanized shell verbs use past/present tense, not the raw tool name.
-        #expect(activity.verbToken == "Ran" || activity.verbToken == "Running")
+        // endedAt set → isActive false → past-tense shell verb.
+        #expect(activity.verbToken == "Ran")
         #expect(activity.durationDescription == "1m")
         #expect(!session.ageDescription.isEmpty)
     }

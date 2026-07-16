@@ -117,6 +117,9 @@ struct DotmSquareLoader: View {
     // MARK: - Style selection helpers
 
     /// Wall-clock rotation through square1…5 (independent of tool/command churn).
+    ///
+    /// `offset` shifts time by a fraction of `interval` so concurrent loaders
+    /// (different sessions) change pattern out of phase, not only index.
     static func style(
         at date: Date,
         interval: TimeInterval = 6,
@@ -124,21 +127,28 @@ struct DotmSquareLoader: View {
     ) -> Style {
         let styles = Style.allCases
         let step = max(1.0, interval)
-        let tick = Int(floor(date.timeIntervalSinceReferenceDate / step))
-        let idx = ((tick + offset) % styles.count + styles.count) % styles.count
+        let phase = Double(offset % styles.count) / Double(styles.count)
+        let shifted = date.timeIntervalSinceReferenceDate + phase * step
+        let tick = Int(floor(shifted / step))
+        let idx = ((tick % styles.count) + styles.count) % styles.count
         return styles[idx]
     }
 
     /// Stable offset from a session id so concurrent loaders desync slightly.
     static func styleOffset(forSeed seed: String) -> Int {
-        abs(seed.utf8.reduce(0) { ($0 &* 31) &+ Int($1) })
+        Int(bitPattern: seedHash(seed))
     }
 
     /// Stable style from any string (session id) for static display.
     static func style(forSeed seed: String) -> Style {
         let styles = Style.allCases
-        let h = abs(seed.utf8.reduce(0) { ($0 &* 31) &+ Int($1) })
-        return styles[h % styles.count]
+        let h = seedHash(seed)
+        return styles[Int(h % UInt(styles.count))]
+    }
+
+    /// Wrapping hash as unsigned so `Int.min` never traps via `abs`.
+    private static func seedHash(_ seed: String) -> UInt {
+        seed.utf8.reduce(UInt(0)) { ($0 &* 31) &+ UInt($1) }
     }
 
     /// Prefer a fixed pattern per agent family for static/idle display only.

@@ -84,7 +84,7 @@ public struct OpenCodePermissionClient: Sendable {
     }
 
     /// Percent-encode a single path segment (slashes must not create extra segments).
-    public static func encodePathSegment(_ value: String) -> String {
+    static func encodePathSegment(_ value: String) -> String {
         var allowed = CharacterSet.urlPathAllowed
         allowed.remove(charactersIn: "/")
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value

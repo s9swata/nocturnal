@@ -159,6 +159,14 @@ public struct CodexEventDecoder: EventDecoding, Sendable {
             result.summaryHint = result.summaryHint ?? "Recovered from local Codex history"
         case "tool.approval_resolved":
             result.clearApproval = true
+            result.resolvedApprovalId = EventDecodeHelpers.string(
+                payload,
+                "tool_use_id",
+                "toolUseId",
+                "request_id",
+                "approval_id",
+                "id"
+            )
             result.state = .running
             if let approved = EventDecodeHelpers.bool(payload, "approved", "ok") {
                 result.summaryHint = approved ? "Approval granted" : "Approval denied"
@@ -182,6 +190,13 @@ public struct CodexEventDecoder: EventDecoding, Sendable {
             result.summaryHint = result.summaryHint ?? prompt
         case "agent.question_answered":
             result.clearQuestion = true
+            result.resolvedQuestionId = EventDecodeHelpers.string(
+                payload,
+                "prompt_id",
+                "question_id",
+                "id",
+                "request_id"
+            )
             result.state = .running
         default:
             result.isUnknown = true

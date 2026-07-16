@@ -129,7 +129,8 @@ protocol HTTPPermissionAdapter: AgentAdapter {
 ```
 
 Built-ins: `CodexAgentAdapter`, `ClaudeAgentAdapter`, `OpenCodeAgentAdapter`,
-`EnvelopeBridgeAdapter` for Tier A catalog entries.
+`GrokAgentAdapter`, `CursorAgentAdapter`, and `EnvelopeBridgeAdapter` for Tier A
+catalog entries.
 
 ## Adding a new agent
 

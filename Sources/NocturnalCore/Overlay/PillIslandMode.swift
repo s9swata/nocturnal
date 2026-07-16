@@ -64,20 +64,23 @@ public struct PillIslandContent: Sendable, Equatable {
 
 /// Builds island content from the session store (testable, no SwiftUI).
 public enum PillIslandPresentation: Sendable {
+    /// Shared live-session predicate for notch loaders, live counts, and menu bar.
+    public static func isIslandLiveSession(_ session: Session) -> Bool {
+        !session.isRecoveryStub
+            && (
+                session.state.needsAttention
+                    || session.state == .running
+                    || session.currentActivity?.isActive == true
+                    || (session.stats.lastToolName != nil && !session.isQuiet)
+            )
+    }
+
     public static func content(
         sessions: [Session],
         socketRunning: Bool
     ) -> PillIslandContent {
         let attentionCount = sessions.filter(\.state.needsAttention).count
-        let liveSessions = sessions.filter {
-            !$0.isRecoveryStub
-                && (
-                    $0.state.needsAttention
-                        || $0.state == .running
-                        || $0.currentActivity?.isActive == true
-                        || ($0.stats.lastToolName != nil && !$0.isQuiet)
-                )
-        }
+        let liveSessions = sessions.filter(isIslandLiveSession)
         let liveCount = liveSessions.count
         let trailing = Array(
             liveSessions

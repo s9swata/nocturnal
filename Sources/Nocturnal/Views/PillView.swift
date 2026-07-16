@@ -259,16 +259,9 @@ struct PillView: View {
 
     /// Live sessions shown as matrix loaders on the right (one per agent family, max 3).
     private var trailingLiveSessions: [Session] {
-        let live = model.snapshot.sessions.filter { session in
-            !session.isRecoveryStub
-                && (
-                    session.state.needsAttention
-                        || session.state == .running
-                        || session.currentActivity?.isActive == true
-                        || (session.stats.lastToolName != nil && !session.isQuiet)
-                )
-        }
-        .sorted { $0.updatedAt > $1.updatedAt }
+        let live = model.snapshot.sessions
+            .filter(PillIslandPresentation.isIslandLiveSession)
+            .sorted { $0.updatedAt > $1.updatedAt }
 
         var out: [Session] = []
         var seen = Set<AgentSource>()

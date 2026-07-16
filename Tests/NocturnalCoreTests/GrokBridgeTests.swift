@@ -228,7 +228,8 @@ struct GrokBridgeTests {
         #expect(snaps.contains { $0.sessionId == "sess-live" && $0.isActive })
         #expect(snaps.contains { $0.sessionId == "sess-aaa" && $0.title == "Island fix" })
 
-        let env = snaps.first { $0.sessionId == "sess-aaa" }!.envelope()
+        let aaa = try #require(snaps.first { $0.sessionId == "sess-aaa" })
+        let env = aaa.envelope()
         #expect(env.source == .grokBuild)
         #expect(env.eventType == "session.reconciled")
     }

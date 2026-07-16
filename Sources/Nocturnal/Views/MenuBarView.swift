@@ -15,15 +15,9 @@ struct MenuBarView: View {
         model.prefersReducedMotion || systemReduceMotion
     }
 
+    /// Same live definition as the notch (`pillIslandContent.liveCount`).
     private var liveCount: Int {
-        model.snapshot.sessions.filter {
-            !$0.isRecoveryStub
-                && (
-                    $0.state.needsAttention
-                        || $0.state == .running
-                        || $0.currentActivity?.isActive == true
-                )
-        }.count
+        model.pillIslandContent.liveCount
     }
 
     var body: some View {

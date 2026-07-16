@@ -7,7 +7,9 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
 APP_NAME=${APP_NAME:-Nocturnal}
-BUNDLE_ID=${BUNDLE_ID:-app.nocturnal.Nocturnal}
+# BUNDLE_ID may be set explicitly; otherwise derived per stage after ICON_STAGE
+# resolution so staging/dev never collide with production Launch Services prefs.
+BUNDLE_ID_EXPLICIT=${BUNDLE_ID:-}
 MACOS_MIN_VERSION=${MACOS_MIN_VERSION:-14.0}
 MENU_BAR_APP=${MENU_BAR_APP:-1}
 SIGNING_MODE=${SIGNING_MODE:-adhoc}
@@ -67,6 +69,18 @@ case "$ICON_STAGE" in
   staging)    APP_DISPLAY_NAME="${APP_NAME} (Staging)" ;;
   dev)        APP_DISPLAY_NAME="${APP_NAME} (Dev)" ;;
 esac
+
+# Distinct default bundle id per non-production stage (override via BUNDLE_ID=).
+if [[ -n "$BUNDLE_ID_EXPLICIT" ]]; then
+  BUNDLE_ID="$BUNDLE_ID_EXPLICIT"
+else
+  case "$ICON_STAGE" in
+    production) BUNDLE_ID="app.nocturnal.Nocturnal" ;;
+    staging)    BUNDLE_ID="app.nocturnal.Nocturnal.staging" ;;
+    dev)        BUNDLE_ID="app.nocturnal.Nocturnal.dev" ;;
+    *)          BUNDLE_ID="app.nocturnal.Nocturnal" ;;
+  esac
+fi
 
 ICON_TARGET="$ROOT/build/Icon.icns"
 ICONSET_DIR="$ROOT/build/Nocturnal.iconset"

@@ -18,7 +18,8 @@ public enum SessionActivityMapping: Sendable {
         // matched PascalCase — so Grok tools never became "meaningful" and stale
         // OpenCode tool rows kept owning the notch.
         let type = normalizeEventType(envelope.eventType)
-        let payload = envelope.payload
+        // Prefer decoder-enriched payload (raw-only tool fields, Shell/Read/Write aliases).
+        let payload = decoded.activityPayload ?? envelope.payload
         let at = envelope.timestamp
         let extracted = ToolPayloadExtraction.extract(from: payload)
 
@@ -406,6 +407,15 @@ public enum SessionActivityMapping: Sendable {
     /// Uses ``CanonicalAgentEvent/normalize(_:)`` so NAP producers (e.g.
     /// `permission.resolved`) reach the same paths as native aliases.
     public static func normalizeEventType(_ raw: String) -> String {
+        // Preserve product Stop / OpenCode session.idle as `Stop` so the Idle
+        // breadcrumb is not collapsed into SessionEnd → "Completed".
+        let grokFirst = GrokEventDecoder.normalizeEventType(raw)
+        if raw == "Stop" || raw == "stop" || raw == "session.idle" || grokFirst == "Stop" {
+            return "Stop"
+        }
+        if raw == "SubagentStop" || grokFirst == "SubagentStop" {
+            return "SubagentStop"
+        }
         let nap = CanonicalAgentEvent.normalize(raw)
         switch nap {
         case CanonicalAgentEvent.toolStarted.rawValue: return "PreToolUse"
@@ -420,11 +430,10 @@ public enum SessionActivityMapping: Sendable {
         case CanonicalAgentEvent.questionAsked.rawValue: return "agent.question"
         case CanonicalAgentEvent.questionAnswered.rawValue: return "question.answered"
         default:
-            let grok = GrokEventDecoder.normalizeEventType(raw)
-            switch grok {
+            switch grokFirst {
             case "tool.started": return "PreToolUse"
             case "tool.completed": return "PostToolUse"
-            default: return grok
+            default: return grokFirst
             }
         }
     }

@@ -266,10 +266,16 @@ public struct OpenCodeSessionScanner: Sendable {
         }
 
         // Fail-open per file: one corrupt session must not hide the rest.
-        return candidates
-            .sorted { $0.modified > $1.modified }
-            .prefix(maxSessions)
-            .compactMap { try? snapshotFromJSON(at: $0.url) }
+        // Walk the full newest-first list until we collect maxSessions successes
+        // (prefix-only would return empty when the newest N files are corrupt).
+        var snapshots: [OpenCodeSessionSnapshot] = []
+        for candidate in candidates.sorted(by: { $0.modified > $1.modified }) {
+            if snapshots.count >= maxSessions { break }
+            if let snap = try? snapshotFromJSON(at: candidate.url) {
+                snapshots.append(snap)
+            }
+        }
+        return snapshots
     }
 
     private func snapshotFromJSON(at url: URL) throws -> OpenCodeSessionSnapshot? {

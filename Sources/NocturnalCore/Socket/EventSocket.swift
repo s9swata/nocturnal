@@ -132,6 +132,12 @@ public actor EventSocketServer {
         for task in tasks {
             task.cancel()
         }
+        // Wait for reader defer cleanup before returning so a concurrent
+        // start()+accept cannot recycle an fd that a deferred shutdown still
+        // holds (or would re-shutdown after close).
+        for task in tasks {
+            await task.value
+        }
         cont?.finish()
 
         // Resume permission waiters last (may suspend). Captured-only teardown

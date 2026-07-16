@@ -39,7 +39,7 @@ open static/icons/verify.html
 Scripts/generate_app_icons.sh          # regenerate from logo
 Scripts/package_app.sh                 # production icon
 NOCTURNAL_ICON_STAGE=staging Scripts/package_app.sh
-CONF=debug Scripts/package_app.sh      # dev badge
+Scripts/package_app.sh debug           # dev badge
 ```
 
 ## Note

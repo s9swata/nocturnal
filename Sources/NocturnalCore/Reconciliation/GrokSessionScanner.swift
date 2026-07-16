@@ -332,11 +332,31 @@ public struct GrokSessionScanner: Sendable {
         maxBytes: Int,
         fileManager: FileManager
     ) -> Data? {
-        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        guard maxBytes > 0 else { return nil }
+        // Reject non-regular files (FIFOs, devices) so read(upToCount:) cannot hang.
+        guard let values = try? url.resourceValues(forKeys: [
+            .isRegularFileKey,
+            .isSymbolicLinkKey,
+        ]) else {
+            // Resource values unavailable: fall back to existence only.
+            guard fileManager.fileExists(atPath: url.path) else { return nil }
+            return readBoundedRegularFile(url, maxBytes: maxBytes)
+        }
+        if values.isSymbolicLink == true { return nil }
+        guard values.isRegularFile == true else { return nil }
+        return readBoundedRegularFile(url, maxBytes: maxBytes)
+    }
+
+    private static func readBoundedRegularFile(_ url: URL, maxBytes: Int) -> Data? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
-        guard let data = try? handle.read(upToCount: maxBytes + 1), !data.isEmpty else {
+        // Saturate maxBytes+1 so Int.max configuration cannot trap on overflow.
+        let probeCount = maxBytes == Int.max ? Int.max : maxBytes + 1
+        guard let data = try? handle.read(upToCount: probeCount), !data.isEmpty else {
             return nil
+        }
+        if maxBytes == Int.max {
+            return data
         }
         // Exactly maxBytes+1 means the file is larger than the recovery limit.
         guard data.count <= maxBytes else { return nil }

@@ -13,7 +13,7 @@ public enum AgentRegistry: Sendable {
         source: .codex,
         capabilities: .fullNative,
         decisionTransport: .stdoutJSON,
-        aliases: ["openai-codex", "openai_codex"],
+        aliases: AgentSource.wireAliases(for: .codex),
         integrationNotes: "Native hooks via nocturnal-hook-forwarder; PermissionRequest blocks for UI decision."
     )
 
@@ -23,7 +23,7 @@ public enum AgentRegistry: Sendable {
         source: .claude,
         capabilities: .fullNative,
         decisionTransport: .stdoutJSON,
-        aliases: ["claude-code", "claude_code", "anthropic"],
+        aliases: AgentSource.wireAliases(for: .claude),
         integrationNotes: "Native Claude Code hooks; PreToolUse / PermissionRequest decision path."
     )
 
@@ -33,7 +33,7 @@ public enum AgentRegistry: Sendable {
         source: .opencode,
         capabilities: .openCode,
         decisionTransport: .http,
-        aliases: ["open-code", "open_code", "anomalyco-opencode"],
+        aliases: AgentSource.wireAliases(for: .opencode),
         integrationNotes: "Plugin + bus events; permission.ask → HTTP reply to OpenCode server."
     )
 
@@ -52,7 +52,7 @@ public enum AgentRegistry: Sendable {
             installableHooks: true
         ),
         decisionTransport: .none,
-        aliases: ["cursor-agent", "cursor_agent", "cursor-ide"],
+        aliases: AgentSource.wireAliases(for: .cursor),
         integrationNotes: "Tier B: ~/.cursor/hooks.json → nocturnal-hook-forwarder --wrap-source cursor. Live activity; Cursor owns permissions."
     )
 
@@ -62,7 +62,7 @@ public enum AgentRegistry: Sendable {
         source: .kimi,
         capabilities: .envelopeBridge,
         decisionTransport: .none,
-        aliases: ["kimi-code", "kimi_code", "kimi-cli", "moonshot-kimi"],
+        aliases: AgentSource.wireAliases(for: .kimi),
         integrationNotes: "Tier A bridge; Kimi hooks/ACP can map to NAP for Tier B/C later."
     )
 
@@ -79,7 +79,7 @@ public enum AgentRegistry: Sendable {
             installableHooks: true
         ),
         decisionTransport: .none,
-        aliases: ["grok", "grokbuild", "grok_build", "xai-grok-build"],
+        aliases: AgentSource.wireAliases(for: .grokBuild),
         integrationNotes: "Tier B: ~/.grok/hooks/nocturnal.json → nocturnal-hook-forwarder. Live activity + recovery; Grok owns permissions."
     )
 
@@ -89,7 +89,7 @@ public enum AgentRegistry: Sendable {
         source: .agy,
         capabilities: .envelopeBridge,
         decisionTransport: .none,
-        aliases: ["agy-agent", "agy_agent"],
+        aliases: AgentSource.wireAliases(for: .agy),
         integrationNotes: "Tier A envelope bridge until product hooks are documented."
     )
 

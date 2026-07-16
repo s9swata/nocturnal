@@ -264,11 +264,15 @@ public actor PermissionBroker {
             expiresAt: Date().addingTimeInterval(earlyTTL)
         )
         if early.count > 64 {
-            // Drop oldest-expired-first; if still over cap, clear all.
+            // Drop expired first; if still over cap, evict only the oldest entry
+            // so late waiters for other recent completions still hit early.
             let now = Date()
             early = early.filter { $0.value.expiresAt > now }
-            if early.count > 64 {
-                early.removeAll(keepingCapacity: true)
+            while early.count > 64 {
+                guard let oldest = early.min(by: { $0.value.expiresAt < $1.value.expiresAt }) else {
+                    break
+                }
+                early.removeValue(forKey: oldest.key)
             }
         }
     }
