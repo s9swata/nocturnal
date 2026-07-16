@@ -258,6 +258,9 @@ for name in "${BRAND_PRODUCTION_PNGS[@]}"; do
     cp "$ROOT/Sources/Nocturnal/Resources/Brand/$name" "$BRAND_DEST/$name"
   elif [[ -f "$ROOT/Assets/Brand/$name" ]]; then
     cp "$ROOT/Assets/Brand/$name" "$BRAND_DEST/$name"
+  elif [[ "$name" == "agent-grok.png" && -f "$ROOT/Assets/Brand/grok.png" ]]; then
+    # Canonical Grok mark lives at Assets/Brand/grok.png; convert-ish copy for runtime name.
+    cp "$ROOT/Assets/Brand/grok.png" "$BRAND_DEST/$name"
   else
     echo "ERROR: missing production brand asset: $name" >&2
     exit 1

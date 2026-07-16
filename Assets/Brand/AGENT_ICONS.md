@@ -13,9 +13,11 @@ Regenerated with [favicontools](https://favicontools.com) MCP `generate_iconset`
 | `agent-claude.png` | Claude Code | `simple-icons:claude` |
 | `agent-opencode.png` | OpenCode | `simple-icons:opencode` |
 | `agent-cursor.png` | Cursor | `simple-icons:cursor` |
-| `agent-grok.png` | Grok Build | **Glyph-only** monochrome spark (not a filled circular app icon) |
+| `agent-grok.png` | Grok Build | Source: `Assets/Brand/grok.png` → black-on-transparent 128/@2x/1024 |
 
-**Template rule:** marks must be line/glyph art with interior transparency. A filled disk + `isTemplate` becomes a solid white circle on the notch.
+**Template rule:** marks are black-on-transparent so `isTemplate` + white tint works on the dark island. A filled solid disk becomes a white circle — use glyph art with interior transparency.
+
+Canonical Grok art: **`Assets/Brand/grok.png`**. Runtime copies live under `Sources/Nocturnal/Resources/Brand/agent-grok*.png`.
 
 Also kept: `@2x` (256) and `-1024` masters next to each mark.
 
