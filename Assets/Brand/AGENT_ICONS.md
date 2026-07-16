@@ -13,7 +13,9 @@ Regenerated with [favicontools](https://favicontools.com) MCP `generate_iconset`
 | `agent-claude.png` | Claude Code | `simple-icons:claude` |
 | `agent-opencode.png` | OpenCode | `simple-icons:opencode` |
 | `agent-cursor.png` | Cursor | `simple-icons:cursor` |
-| `agent-grok.png` | Grok Build | Design asset `icon-1024x1024.png` (data URL) |
+| `agent-grok.png` | Grok Build | **Glyph-only** monochrome spark (not a filled circular app icon) |
+
+**Template rule:** marks must be line/glyph art with interior transparency. A filled disk + `isTemplate` becomes a solid white circle on the notch.
 
 Also kept: `@2x` (256) and `-1024` masters next to each mark.
 
