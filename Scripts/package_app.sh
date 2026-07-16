@@ -209,13 +209,15 @@ fi
 BRAND_DEST="$APP/Contents/Resources/Brand"
 mkdir -p "$BRAND_DEST"
 rm -rf "${BRAND_DEST:?}/"*
-# Core marks + monochrome agent product icons (Codex/Claude/OpenCode).
+# Core marks + monochrome agent product icons.
 BRAND_PRODUCTION_PNGS=(
   nocturnal-app-icon.png
   nocturnal-owl-mark.png
   agent-openai.png
   agent-claude.png
   agent-opencode.png
+  agent-cursor.png
+  agent-grok.png
 )
 for name in "${BRAND_PRODUCTION_PNGS[@]}"; do
   if [[ -f "$ROOT/Sources/Nocturnal/Resources/Brand/$name" ]]; then

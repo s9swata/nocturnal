@@ -17,6 +17,10 @@ enum BrandAssets {
     static let claudeMarkResourceName = "agent-claude"
     /// OpenCode square mark (brand-aligned static SVG).
     static let openCodeMarkResourceName = "agent-opencode"
+    /// Cursor mark (Simple Icons CC0).
+    static let cursorMarkResourceName = "agent-cursor"
+    /// Grok Build monochrome spark (original template mark).
+    static let grokMarkResourceName = "agent-grok"
 
     /// Thread-safe immutable source cache. Entries are never mutated after insert.
     private static let sourceCache = ImageSourceCache()
@@ -40,7 +44,7 @@ enum BrandAssets {
         return image
     }
 
-    /// Monochrome agent product mark for Codex / Claude Code / OpenCode.
+    /// Monochrome agent product mark for supported coding agents.
     static func agentMarkNSImage(for source: AgentSource, size: CGFloat? = nil) -> NSImage? {
         guard let name = agentMarkResourceName(for: source) else { return nil }
         guard let image = mutableCopyOfSource(named: name) else { return nil }
@@ -56,7 +60,9 @@ enum BrandAssets {
         case .codex: return codexMarkResourceName
         case .claude: return claudeMarkResourceName
         case .opencode: return openCodeMarkResourceName
-        case .cursor, .kimi, .grokBuild, .agy, .unknown: return nil
+        case .cursor: return cursorMarkResourceName
+        case .grokBuild: return grokMarkResourceName
+        case .kimi, .agy, .unknown: return nil
         }
     }
 
@@ -68,7 +74,7 @@ enum BrandAssets {
         case .opencode: return "chevron.left.forwardslash.chevron.right"
         case .cursor: return "curlybraces.square"
         case .kimi: return "moon.stars"
-        case .grokBuild: return "hammer"
+        case .grokBuild: return "sparkle"
         case .agy: return "sparkles"
         case .unknown: return "circle.dashed"
         }
