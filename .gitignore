@@ -11,8 +11,11 @@ build/
 *.zip
 
 # Icons / intermediate packaging
-Icon.icns
+/Icon.icns
 .build/entitlements/
+# Generated iconset intermediates (keep *.icns + AppIcon.png under Assets/AppIcons)
+Assets/AppIcons/**/Nocturnal.iconset/
+build/Nocturnal.iconset/
 
 # Xcode (if opened later)
 *.xcodeproj

@@ -42,45 +42,78 @@ mkdir -p \
   "$APP/Contents/Frameworks"
 
 # ---------------------------------------------------------------------------
-# App icon: generate Icon.icns from full-bleed brand PNG source.
+# App icon: stage-aware (production | staging | dev).
+# Prefer pre-generated Assets/AppIcons/<stage>/Icon.icns (Scripts/generate_app_icons.sh).
 # ---------------------------------------------------------------------------
-ICON_PNG_CANDIDATES=(
-  "$ROOT/Assets/Brand/nocturnal-app-icon.png"
-  "$ROOT/Sources/Nocturnal/Resources/Brand/nocturnal-app-icon.png"
-)
-ICON_PNG=""
-for candidate in "${ICON_PNG_CANDIDATES[@]}"; do
-  if [[ -f "$candidate" ]]; then
-    ICON_PNG="$candidate"
-    break
+# CONF=debug → dev icon; release → production unless NOCTURNAL_ICON_STAGE overrides.
+ICON_STAGE="${NOCTURNAL_ICON_STAGE:-}"
+if [[ -z "$ICON_STAGE" ]]; then
+  if [[ "$CONF" == "debug" ]]; then
+    ICON_STAGE="dev"
+  else
+    ICON_STAGE="production"
   fi
-done
+fi
+case "$ICON_STAGE" in
+  production|staging|dev) ;;
+  *)
+    echo "WARNING: unknown NOCTURNAL_ICON_STAGE='$ICON_STAGE'; using production" >&2
+    ICON_STAGE="production"
+    ;;
+esac
+
+case "$ICON_STAGE" in
+  production) APP_DISPLAY_NAME="${APP_NAME}" ;;
+  staging)    APP_DISPLAY_NAME="${APP_NAME} (Staging)" ;;
+  dev)        APP_DISPLAY_NAME="${APP_NAME} (Dev)" ;;
+esac
 
 ICON_TARGET="$ROOT/build/Icon.icns"
 ICONSET_DIR="$ROOT/build/Nocturnal.iconset"
-if [[ -n "$ICON_PNG" ]] && command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
+PREBUILT_ICNS="$ROOT/Assets/AppIcons/${ICON_STAGE}/Icon.icns"
+PREBUILT_PNG="$ROOT/Assets/AppIcons/${ICON_STAGE}/AppIcon.png"
+
+if [[ -f "$PREBUILT_ICNS" ]]; then
+  cp "$PREBUILT_ICNS" "$ICON_TARGET"
+  echo "Using prebuilt ${ICON_STAGE} icon: $PREBUILT_ICNS"
+elif [[ -f "$PREBUILT_PNG" ]] && command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
   rm -rf "$ICONSET_DIR"
   mkdir -p "$ICONSET_DIR"
-  # Standard macOS iconset sizes (1x + 2x).
-  declare -a ICON_SIZES=(16 32 128 256 512)
-  for size in "${ICON_SIZES[@]}"; do
-    sips -z "$size" "$size" "$ICON_PNG" --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null
+  for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" "$PREBUILT_PNG" --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null
     double=$((size * 2))
-    sips -z "$double" "$double" "$ICON_PNG" --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" >/dev/null
+    sips -z "$double" "$double" "$PREBUILT_PNG" --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" >/dev/null
   done
-  # 32x32@1x is also icon_32x32.png; 16@2x is icon_16x16@2x already covered.
-  # iconutil also expects icon_32x32.png (32) and icon_32x32@2x (64) — done above.
   iconutil --convert icns --output "$ICON_TARGET" "$ICONSET_DIR"
-  echo "Generated $ICON_TARGET from $ICON_PNG"
-elif [[ -f "$ROOT/Icon.icns" ]]; then
-  cp "$ROOT/Icon.icns" "$ICON_TARGET"
-  echo "Using existing Icon.icns"
+  echo "Generated $ICON_TARGET from $PREBUILT_PNG (${ICON_STAGE})"
 else
-  echo "WARNING: No app icon source found; CFBundleIconFile may be missing." >&2
-  ICON_TARGET=""
+  # Fallback: brand PNG (unbadged production art).
+  ICON_PNG=""
+  for candidate in \
+    "$ROOT/Sources/Nocturnal/Resources/Brand/nocturnal-app-icon.png" \
+    "$ROOT/Assets/Brand/nocturnal-app-icon.png"
+  do
+    if [[ -f "$candidate" ]]; then ICON_PNG="$candidate"; break; fi
+  done
+  if [[ -n "$ICON_PNG" ]] && command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
+    rm -rf "$ICONSET_DIR"
+    mkdir -p "$ICONSET_DIR"
+    for size in 16 32 128 256 512; do
+      sips -z "$size" "$size" "$ICON_PNG" --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null
+      double=$((size * 2))
+      sips -z "$double" "$double" "$ICON_PNG" --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" >/dev/null
+    done
+    iconutil --convert icns --output "$ICON_TARGET" "$ICONSET_DIR"
+    echo "Generated $ICON_TARGET from brand PNG (no stage set under Assets/AppIcons)"
+  elif [[ -f "$ROOT/Icon.icns" ]]; then
+    cp "$ROOT/Icon.icns" "$ICON_TARGET"
+    echo "Using existing Icon.icns"
+  else
+    echo "WARNING: No app icon source found; CFBundleIconFile may be missing." >&2
+    ICON_TARGET=""
+  fi
 fi
 
-# Also keep legacy Icon.icon → icns path if present and we have no PNG.
 if [[ -z "${ICON_TARGET}" || ! -f "${ICON_TARGET}" ]]; then
   if [[ -f "$ROOT/Icon.icon" ]]; then
     iconutil --convert icns --output "$ROOT/build/Icon.icns" "$ROOT/Icon.icon" || true
@@ -102,7 +135,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key><string>${APP_NAME}</string>
-    <key>CFBundleDisplayName</key><string>${APP_NAME}</string>
+    <key>CFBundleDisplayName</key><string>${APP_DISPLAY_NAME}</string>
     <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
     <key>CFBundleExecutable</key><string>${APP_NAME}</string>
     <key>CFBundlePackageType</key><string>APPL</string>
@@ -111,6 +144,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key><string>${MACOS_MIN_VERSION}</string>
     <key>LSUIElement</key><${LSUI_VALUE}/>
     <key>CFBundleIconFile</key><string>Icon</string>
+    <key>NocturnalIconStage</key><string>${ICON_STAGE}</string>
     <key>BuildTimestamp</key><string>${BUILD_TIMESTAMP}</string>
     <key>GitCommit</key><string>${GIT_COMMIT}</string>
     <key>NSHumanReadableCopyright</key>
