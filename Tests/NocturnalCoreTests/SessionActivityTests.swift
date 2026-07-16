@@ -126,7 +126,7 @@ struct SessionActivityTests {
             endedAt: now,
             toolName: "grep"
         )
-        #expect(grep.humanizedLine.verb == "Grepped")
+        #expect(grep.humanizedLine.verb == "Found")
 
         let mcp = SessionActivity(
             kind: .tool,

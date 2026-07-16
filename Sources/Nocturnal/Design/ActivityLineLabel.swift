@@ -21,6 +21,7 @@ struct ActivityLineLabel: View {
             } ?? Text(""))
         )
         .font(font)
+        .contentTransition(.opacity)
         .accessibilityLabel(line.fullLine)
     }
 }

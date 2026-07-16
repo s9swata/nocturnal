@@ -53,6 +53,8 @@ enum NocturnalMotion {
     static let standard = Animation.easeInOut(duration: 0.2)
     /// Slightly longer for expand/collapse of the overlay panel.
     static let expand = Animation.easeInOut(duration: 0.22)
+    /// Notch title copy: soft crossfade when activity / status text changes.
+    static let titleCrossfade = Animation.easeInOut(duration: 0.28)
     /// Subtle single breath for attention (never aggressive blink).
     static let attentionBreath = Animation.easeInOut(duration: 1.4).repeatForever(autoreverses: true)
 
@@ -62,5 +64,9 @@ enum NocturnalMotion {
 
     static func expand(reduceMotion: Bool) -> Animation? {
         reduceMotion ? nil : expand
+    }
+
+    static func titleCrossfade(reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : titleCrossfade
     }
 }

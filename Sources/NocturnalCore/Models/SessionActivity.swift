@@ -303,11 +303,13 @@ public struct HumanizedActivityLine: Sendable, Equatable, Hashable {
             )
         }
 
-        // Grep / search in code
-        if lower.contains("grep") || lower == "rg" || lower.contains("search") && !isWebSearch(lower: lower, integration: integration) {
+        // Grep / search in code (not "Grepped" — natural language).
+        if lower.contains("grep") || lower == "rg"
+            || (lower.contains("search") && !isWebSearch(lower: lower, integration: integration))
+        {
             let body = firstNonEmpty(extractQuery(from: det), det.map { compactCommand($0, limit: 36) }, file)
             return HumanizedActivityLine(
-                verb: active ? "Grepping" : "Grepped",
+                verb: active ? "Searching" : "Found",
                 detail: body
             )
         }

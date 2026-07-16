@@ -216,9 +216,18 @@ struct PillView: View {
 
     @ViewBuilder
     private var centerColumn: some View {
-        VStack(alignment: .leading, spacing: content.mode == .liveExpanded || content.mode == .attention ? 2 : 0) {
+        let primaryLine = content.primaryLine ?? HumanizedActivityLine(verb: content.primary)
+        let primaryKey = primaryLine.fullLine
+        let showSecondary = content.mode == .liveExpanded || content.mode == .attention
+        let secondaryText = (showSecondary ? content.secondary : nil)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let secondaryKey = (secondaryText?.isEmpty == false) ? (secondaryText ?? "") : ""
+
+        VStack(alignment: .leading, spacing: showSecondary ? 2 : 0) {
+            // Identity-keyed so SwiftUI crossfades when the activity title changes
+            // (tool → tool, Running → Idle, Approve…, etc.).
             ActivityLineLabel(
-                line: content.primaryLine ?? HumanizedActivityLine(verb: content.primary),
+                line: primaryLine,
                 font: .caption.weight(isAttention ? .semibold : .medium),
                 verbColor: primaryColor,
                 detailColor: NocturnalPalette.fgSecondary
@@ -226,19 +235,26 @@ struct PillView: View {
             .lineLimit(1)
             .minimumScaleFactor(0.8)
             .allowsTightening(true)
+            .id("pill-primary-\(primaryKey)")
+            .transition(.opacity.combined(with: .offset(y: reduceMotion ? 0 : 2)))
 
-            if let secondary = content.secondary,
-               !secondary.isEmpty,
-               content.mode == .liveExpanded || content.mode == .attention
-            {
-                Text(secondary)
+            if let secondaryText, !secondaryText.isEmpty {
+                Text(secondaryText)
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(NocturnalPalette.fgSecondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .minimumScaleFactor(0.8)
+                    .contentTransition(.opacity)
+                    .id("pill-secondary-\(secondaryKey)")
+                    .transition(.opacity.combined(with: .offset(y: reduceMotion ? 0 : 1)))
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .clipped()
+        .animation(NocturnalMotion.titleCrossfade(reduceMotion: reduceMotion), value: primaryKey)
+        .animation(NocturnalMotion.titleCrossfade(reduceMotion: reduceMotion), value: secondaryKey)
+        .animation(NocturnalMotion.titleCrossfade(reduceMotion: reduceMotion), value: content.mode)
     }
 
     /// Live sessions shown as matrix loaders on the right (one per agent family, max 3).
@@ -283,26 +299,23 @@ struct PillView: View {
                 let active = session.state.needsAttention
                     || session.state == .running
                     || session.currentActivity?.isActive == true
-                let style: DotmSquareLoader.Style = {
-                    if let activity = session.currentActivity, activity.isActive {
-                        return DotmSquareLoader.style(for: activity)
-                    }
-                    return DotmSquareLoader.style(for: session.source)
-                }()
+                // Pattern rotates on a wall-clock interval — not per tool/command
+                // (commands thrash too fast for a readable loader).
                 DotmSquareLoader(
-                    style: style,
+                    style: DotmSquareLoader.style(for: session.source),
                     size: trailingMatrixSize,
                     dotSize: max(1.6, trailingMatrixSize / 6.5),
-                    // Full-strength tint; static mode uses per-dot 50% opacity inside
-                    // the loader (avoid double-dimming to muddy black).
                     color: session.state.needsAttention
                         ? NocturnalPalette.accentAttention
                         : NocturnalPalette.fgPrimary,
                     speed: active ? 1.1 : 0.85,
                     animate: !reduceMotion && active,
-                    staticOpacity: 0.5
+                    staticOpacity: 0.5,
+                    rotateByTime: true,
+                    styleInterval: 6,
+                    styleOffset: DotmSquareLoader.styleOffset(forSeed: session.id.rawValue)
                 )
-                .accessibilityLabel("\(session.source.displayName) \(style.accessibilityName)")
+                .accessibilityLabel("\(session.source.displayName) activity")
             }
             if content.liveCount > sessions.count {
                 Text("+\(content.liveCount - sessions.count)")

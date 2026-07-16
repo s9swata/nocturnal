@@ -5,6 +5,7 @@ import NocturnalCore
 ///
 /// 5×5 LED-style loaders driven by pure math + `TimelineView` (no WebView, no Metal).
 /// Opacity curves mirror the upstream CSS keyframes / stepped snake path.
+/// Animated fills use upstream `grad-ocean`; static rest stays monochrome.
 ///
 /// License: upstream allows product use; these are reimplementations, not a republished
 /// component library.
@@ -29,10 +30,14 @@ struct DotmSquareLoader: View {
         }
     }
 
+    /// Fallback / static pattern. When `rotateByTime` is true and animating,
+    /// the loader cycles square1…5 on a wall-clock interval instead of following
+    /// tool/command changes (which thrash the notch).
     var style: Style = .square2
     /// Outer box (width = height).
     var size: CGFloat = 24
     var dotSize: CGFloat = 3
+    /// Solid tint for the **static** rest state only. Animated frames use `grad-ocean`.
     var color: Color = NocturnalPalette.fgPrimary
     /// 1 = ~1.5s cycle (matches upstream `--dmx-cycle`).
     var speed: Double = 1
@@ -42,6 +47,12 @@ struct DotmSquareLoader: View {
     var squareDots: Bool = false
     /// Per-dot opacity used when `animate` is false (default 50% opaque matrix).
     var staticOpacity: Double = 0.5
+    /// Rotate through square1…5 on a timer while animating (default on).
+    var rotateByTime: Bool = true
+    /// Seconds each pattern stays before advancing (live strip).
+    var styleInterval: TimeInterval = 6
+    /// Phase offset so multiple loaders aren’t locked in sync (session seed).
+    var styleOffset: Int = 0
 
     var body: some View {
         let gap = max(0.5, (size - CGFloat(DotmSquareMath.matrix) * dotSize) / CGFloat(DotmSquareMath.matrix - 1))
@@ -62,22 +73,29 @@ struct DotmSquareLoader: View {
     @ViewBuilder
     private func grid(at date: Date?, gap: CGFloat) -> some View {
         let t = DotmSquareMath.phase(at: date, speed: speed)
+        let isAnimating = animate && date != nil
+        let effectiveStyle: Style = {
+            if rotateByTime, let date, animate {
+                return Self.style(at: date, interval: styleInterval, offset: styleOffset)
+            }
+            return style
+        }()
         VStack(spacing: gap) {
             ForEach(0..<DotmSquareMath.matrix, id: \.self) { row in
                 HStack(spacing: gap) {
                     ForEach(0..<DotmSquareMath.matrix, id: \.self) { col in
                         let index = DotmSquareMath.rowMajor(row, col)
                         let opacity = DotmSquareMath.opacity(
-                            style: style,
+                            style: effectiveStyle,
                             index: index,
                             row: row,
                             col: col,
                             t: t,
-                            animate: animate && date != nil,
+                            animate: isAnimating,
                             staticOpacity: staticOpacity
                         )
                         RoundedRectangle(cornerRadius: squareDots ? 0.5 : dotSize / 2, style: .continuous)
-                            .fill(color.opacity(opacity))
+                            .fill(dotFill(isAnimating: isAnimating, opacity: opacity))
                             .frame(width: dotSize, height: dotSize)
                     }
                 }
@@ -85,16 +103,45 @@ struct DotmSquareLoader: View {
         }
     }
 
+    /// Animated: upstream `grad-ocean` gradient on every lit dot.
+    /// Static: monochrome `color` at rest opacity.
+    private func dotFill(isAnimating: Bool, opacity: Double) -> AnyShapeStyle {
+        if isAnimating {
+            return AnyShapeStyle(
+                DotmSquareMath.gradOceanFill.opacity(opacity)
+            )
+        }
+        return AnyShapeStyle(color.opacity(opacity))
+    }
+
     // MARK: - Style selection helpers
 
-    /// Stable style from any string (session id) so concurrent agents show different patterns.
+    /// Wall-clock rotation through square1…5 (independent of tool/command churn).
+    static func style(
+        at date: Date,
+        interval: TimeInterval = 6,
+        offset: Int = 0
+    ) -> Style {
+        let styles = Style.allCases
+        let step = max(1.0, interval)
+        let tick = Int(floor(date.timeIntervalSinceReferenceDate / step))
+        let idx = ((tick + offset) % styles.count + styles.count) % styles.count
+        return styles[idx]
+    }
+
+    /// Stable offset from a session id so concurrent loaders desync slightly.
+    static func styleOffset(forSeed seed: String) -> Int {
+        abs(seed.utf8.reduce(0) { ($0 &* 31) &+ Int($1) })
+    }
+
+    /// Stable style from any string (session id) for static display.
     static func style(forSeed seed: String) -> Style {
         let styles = Style.allCases
         let h = abs(seed.utf8.reduce(0) { ($0 &* 31) &+ Int($1) })
         return styles[h % styles.count]
     }
 
-    /// Prefer a fixed pattern per agent family so the notch right-strip is readable at a glance.
+    /// Prefer a fixed pattern per agent family for static/idle display only.
     static func style(for source: AgentSource) -> Style {
         switch source {
         case .codex: return .square1
@@ -104,16 +151,6 @@ struct DotmSquareLoader: View {
         case .grokBuild: return .square5
         case .kimi, .agy, .unknown:
             return style(forSeed: source.rawValue)
-        }
-    }
-
-    static func style(for activity: SessionActivity) -> Style {
-        switch activity.kind {
-        case .tool: return .square2
-        case .turn: return .square3
-        case .session: return .square1
-        case .approval, .question: return .square4
-        case .notification, .unknown: return .square5
         }
     }
 }
@@ -129,6 +166,41 @@ private enum DotmSquareMath {
     static let opacityBase: Double = 0.16
     static let opacityMid: Double = 0.32
     static let opacityPeak: Double = 1.0
+
+    // MARK: grad-ocean (from zzzzshawn/matrix `color-presets.ts`)
+    // fill: linear-gradient(140deg, #00c6ff 0%, #0072ff 48%, #4facfe 100%)
+    // glow: #2f8fff (used by upstream for bloom/filter; opacity animation only here)
+
+    private static let oceanCyan = Color(red: 0.0, green: 0.776, blue: 1.0) // #00c6ff
+    private static let oceanDeep = Color(red: 0.0, green: 0.447, blue: 1.0) // #0072ff
+    private static let oceanSky = Color(red: 0.310, green: 0.675, blue: 0.996) // #4facfe
+
+    /// CSS `linear-gradient(140deg, …)` → unit points (0° = up, clockwise).
+    static let gradOceanFill = LinearGradient(
+        stops: [
+            .init(color: oceanCyan, location: 0),
+            .init(color: oceanDeep, location: 0.48),
+            .init(color: oceanSky, location: 1),
+        ],
+        startPoint: cssGradientStart(degrees: 140),
+        endPoint: cssGradientEnd(degrees: 140)
+    )
+
+    /// CSS angle: 0° points up, increases clockwise. y grows downward (same as SwiftUI).
+    private static func cssGradientStart(degrees: Double) -> UnitPoint {
+        let (dx, dy) = cssGradientDirection(degrees: degrees)
+        return UnitPoint(x: 0.5 - 0.5 * dx, y: 0.5 - 0.5 * dy)
+    }
+
+    private static func cssGradientEnd(degrees: Double) -> UnitPoint {
+        let (dx, dy) = cssGradientDirection(degrees: degrees)
+        return UnitPoint(x: 0.5 + 0.5 * dx, y: 0.5 + 0.5 * dy)
+    }
+
+    private static func cssGradientDirection(degrees: Double) -> (CGFloat, CGFloat) {
+        let radians = degrees * .pi / 180
+        return (CGFloat(sin(radians)), CGFloat(-cos(radians)))
+    }
 
     static func rowMajor(_ row: Int, _ col: Int) -> Int { row * matrix + col }
 

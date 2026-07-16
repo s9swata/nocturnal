@@ -104,12 +104,17 @@ struct SessionTimelineView: View {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         if activity.isActive {
                             DotmSquareLoader(
-                                style: DotmSquareLoader.style(for: activity),
+                                style: .square2,
                                 size: 14,
                                 dotSize: 2,
                                 color: NocturnalPalette.accentSuccess,
                                 speed: 1.05,
-                                animate: !prefersReducedMotion && !systemReduceMotion
+                                animate: !prefersReducedMotion && !systemReduceMotion,
+                                rotateByTime: true,
+                                styleInterval: 6,
+                                styleOffset: DotmSquareLoader.styleOffset(
+                                    forSeed: activity.id.uuidString
+                                )
                             )
                         } else {
                             AnimatedStatusSymbol(
