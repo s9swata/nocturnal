@@ -197,14 +197,13 @@ cat > "$STATIC/verify.html" <<'HTML'
 <head>
   <meta charset="utf-8">
   <title>Nocturnal icon verify</title>
-  <!--# include via copy-paste of head-icons.html in real hosts; inlined for local check -->
-  <link rel="icon" type="image/x-icon" href="icons/production/favicon.ico" id="nocturnal-favicon">
-  <link rel="icon" type="image/png" sizes="32x32" href="icons/production/icon-32.png" id="nocturnal-favicon-32">
-  <link rel="apple-touch-icon" href="icons/production/apple-touch-icon.png" id="nocturnal-apple-touch">
-  <link rel="manifest" href="icons/production/site.webmanifest" id="nocturnal-manifest">
+  <link rel="icon" type="image/x-icon" href="production/favicon.ico" id="nocturnal-favicon">
+  <link rel="icon" type="image/png" sizes="32x32" href="production/icon-32.png" id="nocturnal-favicon-32">
+  <link rel="apple-touch-icon" href="production/apple-touch-icon.png" id="nocturnal-apple-touch">
+  <link rel="manifest" href="production/site.webmanifest" id="nocturnal-manifest">
   <style>
     body { font: 15px/1.5 system-ui; background: #0a0a0a; color: #ededed; padding: 2rem; }
-    button { margin: 0.25rem; padding: 0.5rem 0.75rem; }
+    button { margin: 0.25rem; padding: 0.5rem 0.75rem; cursor: pointer; }
     img { width: 64px; height: 64px; margin: 0.5rem; border-radius: 12px; background: #141414; }
   </style>
 </head>
@@ -221,7 +220,7 @@ cat > "$STATIC/verify.html" <<'HTML'
     function apply(stage) {
       document.documentElement.setAttribute("data-nocturnal-stage", stage);
       document.getElementById("stage").textContent = stage;
-      var base = "icons/" + stage + "/";
+      var base = stage + "/";
       document.getElementById("nocturnal-favicon").href = base + "favicon.ico";
       document.getElementById("nocturnal-favicon-32").href = base + "icon-32.png";
       document.getElementById("nocturnal-apple-touch").href = base + "apple-touch-icon.png";
@@ -245,7 +244,7 @@ echo ""
 echo "Generated:"
 echo "  Assets/AppIcons/{production,staging,dev}/Icon.icns"
 echo "  static/icons/{production,staging,dev}/  (favicon + PWA)"
-echo "  static/verify.html  → open to check tab icons"
+echo "  static/icons/verify.html  → open to check tab icons"
 echo ""
 echo "Package with:"
 echo "  NOCTURNAL_ICON_STAGE=production Scripts/package_app.sh"
