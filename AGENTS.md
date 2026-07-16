@@ -126,6 +126,7 @@ docs/
 ## Key docs
 
 - `docs/ARCHITECTURE.md` — system design
+- `docs/AGENT_INTEGRATION.md` — multi-agent model (NAP, profiles, tiers A–C)
 - `docs/HOOK_SCHEMAS.md` — implemented vs unknown events
 - `docs/simulation.md` — local simulation recipes
 - `ARCHITECT_HANDOFF.md` — next implementation tasks

@@ -33,9 +33,15 @@ struct PillView: View {
         model.primaryLiveSession?.pendingApproval
     }
 
+    /// Only agents with a real decision transport get Deny/Allow in the notch.
+    private var canInlineDecide: Bool {
+        guard let session = model.primaryLiveSession else { return false }
+        return AgentRegistry.profile(for: session).supportsInlinePermissionDecision
+    }
+
     var body: some View {
         Group {
-            if isAttention, pendingApproval != nil {
+            if isAttention, pendingApproval != nil, canInlineDecide {
                 attentionIsland
             } else {
                 tappableIsland
@@ -118,7 +124,7 @@ struct PillView: View {
             .disabled(decisionBusy)
             .layoutPriority(0)
 
-            if showDecisionChips, let request = pendingApproval {
+            if showDecisionChips, canInlineDecide, let request = pendingApproval {
                 decisionChips(for: request)
                     .fixedSize()
                     .layoutPriority(1)

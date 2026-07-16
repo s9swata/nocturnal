@@ -56,7 +56,7 @@ enum BrandAssets {
         case .codex: return codexMarkResourceName
         case .claude: return claudeMarkResourceName
         case .opencode: return openCodeMarkResourceName
-        case .unknown: return nil
+        case .cursor, .kimi, .grokBuild, .agy, .unknown: return nil
         }
     }
 
@@ -66,6 +66,10 @@ enum BrandAssets {
         case .codex: return "cpu"
         case .claude: return "bubble.left.and.bubble.right"
         case .opencode: return "chevron.left.forwardslash.chevron.right"
+        case .cursor: return "curlybraces.square"
+        case .kimi: return "moon.stars"
+        case .grokBuild: return "hammer"
+        case .agy: return "sparkles"
         case .unknown: return "circle.dashed"
         }
     }

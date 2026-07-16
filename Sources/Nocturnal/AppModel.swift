@@ -325,18 +325,11 @@ final class AppModel {
                 approved: approved,
                 message: decision.note
             )
-            // Phase 2: also try OpenCode HTTP API (plugin path is primary; this is backup).
-            if request.raw["source"]?.stringValue == "opencode"
-                || (request.raw["permission"] != nil && request.sessionId.rawValue.hasPrefix("ses_"))
-                || request.raw["opencode"]?.boolValue == true
-            {
-                await deliverOpenCodePermission(
-                    request: request,
-                    approved: approved,
-                    scope: scope
-                )
-            } else if let session = await store.session(id: request.sessionId),
-                      session.source == .opencode
+            // Route product-specific decision transport via AgentRegistry / adapters.
+            let profile = await permissionProfile(for: request)
+            if profile.decisionTransport == .http
+                || (profile.source == .opencode)
+                || OpenCodeAgentAdapter().shouldDeliverHTTPPermission(for: request)
             {
                 await deliverOpenCodePermission(
                     request: request,
@@ -361,6 +354,20 @@ final class AppModel {
             statusMessage = "Response failed: \(error.localizedDescription)"
             return false
         }
+    }
+
+    /// Resolve which agent profile owns a permission decision.
+    private func permissionProfile(for request: ApprovalRequest) async -> AgentProfile {
+        if let session = await store.session(id: request.sessionId) {
+            return AgentRegistry.profile(for: session)
+        }
+        if let raw = request.raw["source"]?.stringValue {
+            return AgentRegistry.profile(parsing: raw)
+        }
+        if OpenCodeSessionIdentity.isOpenCodeSessionId(request.sessionId.rawValue) {
+            return AgentRegistry.opencode
+        }
+        return AgentRegistry.unknown
     }
 
     /// Best-effort OpenCode server permission reply (fail-open).

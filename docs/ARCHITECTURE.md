@@ -1,6 +1,8 @@
 # Nocturnal Architecture
 
-Nocturnal is a **local-first** macOS 14+ companion for AI coding agents (Codex, Claude Code). It has no accounts, telemetry, cloud backend, paywall, or license gate.
+Nocturnal is a **local-first** macOS 14+ companion for AI coding agents (Codex, Claude Code, OpenCode; envelope bridges for Cursor, Kimi, Grok Build, and others). It has no accounts, telemetry, cloud backend, paywall, or license gate.
+
+Agent integration is **capability-based** — see `docs/AGENT_INTEGRATION.md` for the Nocturnal Agent Protocol (NAP), tiers A–C, and `AgentRegistry`.
 
 ## Goals
 

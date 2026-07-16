@@ -47,6 +47,21 @@ public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
             result = claude.decode(envelope)
         case .opencode:
             result = opencode.decode(envelope)
+        case .cursor, .kimi, .grokBuild, .agy:
+            // Tier A: no product decoder yet — generic lifecycle passthrough
+            // plus best-effort Codex/Claude/OpenCode structural decode.
+            let codexResult = codex.decode(envelope)
+            if !codexResult.isUnknown {
+                result = codexResult
+            } else {
+                let claudeResult = claude.decode(envelope)
+                if !claudeResult.isUnknown {
+                    result = claudeResult
+                } else {
+                    let openResult = opencode.decode(envelope)
+                    result = openResult.isUnknown ? Self.unknownPassthrough(envelope) : openResult
+                }
+            }
         case .unknown:
             // OpenCode ses_* / native bus names — never Claude by accident.
             if OpenCodeSessionIdentity.isOpenCodeSessionId(envelope.sessionId)
