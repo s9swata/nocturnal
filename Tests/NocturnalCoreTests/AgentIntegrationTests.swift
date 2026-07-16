@@ -12,7 +12,7 @@ struct AgentIntegrationTests {
     }
 
     @Test func tierATargetsDoNotShowFakePermissionChips() {
-        for profile in [AgentRegistry.cursor, AgentRegistry.kimi, AgentRegistry.agy] {
+        for profile in [AgentRegistry.kimi, AgentRegistry.agy] {
             #expect(profile.capabilities.liveActivity)
             #expect(!profile.supportsInlinePermissionDecision)
             #expect(profile.decisionTransport == .none)
@@ -28,6 +28,15 @@ struct AgentIntegrationTests {
         #expect(!profile.supportsInlinePermissionDecision)
         #expect(AgentRegistry.hookProduct(for: profile) == .grok)
         #expect(AgentAdapterCatalog.adapter(for: .grokBuild) is GrokAgentAdapter)
+    }
+
+    @Test func cursorIsInstallableLiveOnly() {
+        let profile = AgentRegistry.cursor
+        #expect(profile.capabilities.liveActivity)
+        #expect(profile.capabilities.installableHooks)
+        #expect(!profile.supportsInlinePermissionDecision)
+        #expect(AgentRegistry.hookProduct(for: profile) == .cursor)
+        #expect(AgentAdapterCatalog.adapter(for: .cursor) is CursorAgentAdapter)
     }
 
     @Test func installableMatchesHookProducts() {

@@ -39,7 +39,7 @@ profile.capabilities.permissions
 | `claude` | `.claude` | C | stdout JSON |
 | `opencode` | `.opencode` | C | HTTP permission API |
 | `grok-build` | `.grokBuild` | **B** (live + install + recovery) | none (Grok owns permissions) |
-| `cursor` | `.cursor` | A | none |
+| `cursor` | `.cursor` | **B** (live + install) | none (Cursor owns permissions) |
 | `kimi` | `.kimi` | A | none |
 | `agy` | `.agy` | A | none |
 | `generic` | `.unknown` | A | response file (optional) |
@@ -55,6 +55,17 @@ nocturnal-setup install --product grok
 
 Native file: `~/.grok/hooks/nocturnal.json` → `nocturnal-hook-forwarder --wrap-source grok-build`.  
 Recovery: `active_sessions.json` + recent `sessions/**/summary.json` (idle stubs only).
+
+### Cursor (live)
+
+```bash
+nocturnal-setup install --product cursor
+# Reload Cursor (or open a new Agent chat) so ~/.cursor/hooks.json is picked up.
+# sessionStart / preToolUse / postToolUse / stop appear as Cursor in the island.
+```
+
+Native file: `~/.cursor/hooks.json` (merged; foreign hooks preserved) →  
+`nocturnal-hook-forwarder --wrap-source cursor`. Permissions stay in Cursor.
 
 Capabilities live in `AgentCapabilities`. Lookup:
 

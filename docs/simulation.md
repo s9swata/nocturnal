@@ -53,6 +53,7 @@ cat Fixtures/claude/session-lifecycle.ndjson | "$BIN/nocturnal-hook-forwarder" -
 cat Fixtures/opencode/session-lifecycle.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source opencode
 cat Fixtures/opencode/native-bus-events.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source opencode
 cat Fixtures/grok/session-lifecycle.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source grok-build
+cat Fixtures/cursor/session-lifecycle.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source cursor
 
 # Bad flags must not steal values (still exit 0 — fail-open):
 "$BIN/nocturnal-hook-forwarder" --socket --timeout 1 </dev/null
@@ -77,7 +78,20 @@ open build/Nocturnal.app
 # then pipe fixtures through build/Nocturnal.app/Contents/MacOS/nocturnal-hook-forwarder
 ```
 
-Fixtures shipped in the app: `Contents/Resources/Fixtures/{codex,claude,opencode,grok}/`.
+Fixtures shipped in the app: `Contents/Resources/Fixtures/{codex,claude,opencode,grok,cursor}/`.
+
+### Cursor live (hooks)
+
+```bash
+nocturnal-setup install --product cursor
+# Open a Cursor Agent chat; sessionStart / tools / stop should appear as Cursor.
+```
+
+Simulate without Cursor:
+
+```bash
+cat Fixtures/cursor/session-lifecycle.ndjson | "$BIN/nocturnal-hook-forwarder" --wrap-source cursor
+```
 
 ### Grok Build live (hooks)
 

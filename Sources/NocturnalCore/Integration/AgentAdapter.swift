@@ -59,6 +59,12 @@ public struct GrokAgentAdapter: HookInstallingAdapter {
     public var hookProduct: HookProduct? { .grok }
 }
 
+public struct CursorAgentAdapter: HookInstallingAdapter {
+    public init() {}
+    public var profile: AgentProfile { AgentRegistry.cursor }
+    public var hookProduct: HookProduct? { .cursor }
+}
+
 /// Envelope-bridge adapters: accept wire events only; no install / decisions yet.
 public struct EnvelopeBridgeAdapter: AgentAdapter {
     public let profile: AgentProfile
@@ -74,7 +80,7 @@ public enum AgentAdapterCatalog: Sendable {
         ClaudeAgentAdapter(),
         OpenCodeAgentAdapter(),
         GrokAgentAdapter(),
-        EnvelopeBridgeAdapter(profile: AgentRegistry.cursor),
+        CursorAgentAdapter(),
         EnvelopeBridgeAdapter(profile: AgentRegistry.kimi),
         EnvelopeBridgeAdapter(profile: AgentRegistry.agy),
         EnvelopeBridgeAdapter(profile: AgentRegistry.generic),
@@ -85,7 +91,7 @@ public enum AgentAdapterCatalog: Sendable {
         case .codex: return CodexAgentAdapter()
         case .claude: return ClaudeAgentAdapter()
         case .opencode: return OpenCodeAgentAdapter()
-        case .cursor: return EnvelopeBridgeAdapter(profile: AgentRegistry.cursor)
+        case .cursor: return CursorAgentAdapter()
         case .kimi: return EnvelopeBridgeAdapter(profile: AgentRegistry.kimi)
         case .grokBuild: return GrokAgentAdapter()
         case .agy: return EnvelopeBridgeAdapter(profile: AgentRegistry.agy)

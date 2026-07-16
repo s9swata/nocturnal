@@ -26,6 +26,7 @@ public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
     private let claude: ClaudeEventDecoder
     private let opencode: OpenCodeEventDecoder
     private let grok: GrokEventDecoder
+    private let cursor: CursorEventDecoder
     private let lock = NSLock()
     private var metrics = EventDecodeMetrics()
 
@@ -33,12 +34,14 @@ public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
         codex: CodexEventDecoder = CodexEventDecoder(),
         claude: ClaudeEventDecoder = ClaudeEventDecoder(),
         opencode: OpenCodeEventDecoder = OpenCodeEventDecoder(),
-        grok: GrokEventDecoder = GrokEventDecoder()
+        grok: GrokEventDecoder = GrokEventDecoder(),
+        cursor: CursorEventDecoder = CursorEventDecoder()
     ) {
         self.codex = codex
         self.claude = claude
         self.opencode = opencode
         self.grok = grok
+        self.cursor = cursor
     }
 
     public func decode(_ envelope: EventEnvelope) -> DecodedEvent {
@@ -52,23 +55,26 @@ public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
             result = opencode.decode(envelope)
         case .grokBuild:
             result = grok.decode(envelope)
-        case .cursor, .kimi, .agy:
-            // Tier A: no product decoder yet — generic lifecycle passthrough
-            // plus best-effort structural decode (prefer Grok when names match).
-            let grokResult = grok.decode(envelope)
-            if !grokResult.isUnknown {
-                result = grokResult
+        case .cursor:
+            result = cursor.decode(envelope)
+        case .kimi, .agy:
+            // Tier A: best-effort structural decode.
+            let cursorResult = cursor.decode(envelope)
+            if !cursorResult.isUnknown {
+                result = cursorResult
             } else {
-                let codexResult = codex.decode(envelope)
-                if !codexResult.isUnknown {
-                    result = codexResult
+                let grokResult = grok.decode(envelope)
+                if !grokResult.isUnknown {
+                    result = grokResult
                 } else {
-                    let claudeResult = claude.decode(envelope)
-                    if !claudeResult.isUnknown {
-                        result = claudeResult
+                    let codexResult = codex.decode(envelope)
+                    if !codexResult.isUnknown {
+                        result = codexResult
                     } else {
-                        let openResult = opencode.decode(envelope)
-                        result = openResult.isUnknown ? Self.unknownPassthrough(envelope) : openResult
+                        let claudeResult = claude.decode(envelope)
+                        result = claudeResult.isUnknown
+                            ? Self.unknownPassthrough(envelope)
+                            : claudeResult
                     }
                 }
             }
@@ -338,6 +344,12 @@ public struct EnvelopeNormalizer: Sendable {
 
         let inferredSource: AgentSource = {
             if defaultSource != .unknown { return defaultSource }
+            // Cursor payloads always carry conversation_id + cursor_version / workspace_roots.
+            if object["cursor_version"] != nil
+                || object["conversation_id"] != nil && object["workspace_roots"] != nil
+            {
+                return .cursor
+            }
             // Grok runner injects GROK_* env; payload still looks Claude-like.
             // Prefer explicit wrap-source; without it, keep historical Claude bias
             // for bare hook_event_name (Claude installs never set wrap-source grok).

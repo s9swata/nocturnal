@@ -63,9 +63,9 @@ public enum SetupCLIParseError: Error, Sendable, Equatable, CustomStringConverti
     public var description: String {
         switch self {
         case .missingProductValue:
-            return "missing value for --product (expected codex|claude|opencode|grok|all)"
+            return "missing value for --product (expected codex|claude|opencode|grok|cursor|all)"
         case .unknownProduct(let raw):
-            return "unknown product: \(raw) (expected codex|claude|opencode|grok|all)"
+            return "unknown product: \(raw) (expected codex|claude|opencode|grok|cursor|all)"
         case .missingForwarderValue:
             return "missing value for --forwarder (expected path to nocturnal-hook-forwarder)"
         case .missingModeValue:
@@ -121,6 +121,8 @@ public struct SetupCLIOptions: Sendable, Equatable {
                 options.products = [.opencode]
             case "grok", "grok-build", "grokbuild", "grok_build":
                 options.products = [.grok]
+            case "cursor", "cursor-agent", "cursor_agent":
+                options.products = [.cursor]
             default:
                 throw SetupCLIParseError.unknownProduct(raw)
             }

@@ -1,0 +1,6 @@
+{"hook_event_name":"sessionStart","conversation_id":"conv-cursor-demo-001","session_id":"conv-cursor-demo-001","workspace_roots":["/Users/demo/Projects/nocturnal"],"cursor_version":"1.7.2","model":"claude-sonnet"}
+{"hook_event_name":"beforeSubmitPrompt","conversation_id":"conv-cursor-demo-001","prompt":"fix the island clip","workspace_roots":["/Users/demo/Projects/nocturnal"],"cursor_version":"1.7.2"}
+{"hook_event_name":"preToolUse","conversation_id":"conv-cursor-demo-001","tool_name":"Shell","tool_input":{"command":"swift test"},"cwd":"/Users/demo/Projects/nocturnal","workspace_roots":["/Users/demo/Projects/nocturnal"],"cursor_version":"1.7.2"}
+{"hook_event_name":"postToolUse","conversation_id":"conv-cursor-demo-001","tool_name":"Shell","tool_input":{"command":"swift test"},"tool_output":"{\"exitCode\":0}","cwd":"/Users/demo/Projects/nocturnal","duration":1200,"cursor_version":"1.7.2"}
+{"hook_event_name":"afterFileEdit","conversation_id":"conv-cursor-demo-001","file_path":"/Users/demo/Projects/nocturnal/Sources/Nocturnal/Views/PillView.swift","edits":[{"old_string":"a","new_string":"b"}],"workspace_roots":["/Users/demo/Projects/nocturnal"],"cursor_version":"1.7.2"}
+{"hook_event_name":"stop","conversation_id":"conv-cursor-demo-001","status":"completed","loop_count":0,"workspace_roots":["/Users/demo/Projects/nocturnal"],"cursor_version":"1.7.2"}

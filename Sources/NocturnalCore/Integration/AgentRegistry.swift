@@ -43,10 +43,17 @@ public enum AgentRegistry: Sendable {
         id: "cursor",
         displayName: "Cursor",
         source: .cursor,
-        capabilities: .envelopeBridge,
+        capabilities: AgentCapabilities(
+            liveActivity: true,
+            permissions: false,
+            questions: false,
+            recoveryScan: false,
+            jumpBack: true,
+            installableHooks: true
+        ),
         decisionTransport: .none,
         aliases: ["cursor-agent", "cursor_agent", "cursor-ide"],
-        integrationNotes: "Tier A: post EventEnvelope NDJSON to appear live. Permissions require Cursor agent hooks."
+        integrationNotes: "Tier B: ~/.cursor/hooks.json → nocturnal-hook-forwarder --wrap-source cursor. Live activity; Cursor owns permissions."
     )
 
     public static let kimi = AgentProfile(
@@ -194,6 +201,7 @@ public enum AgentRegistry: Sendable {
         case .claude: return .claude
         case .opencode: return .opencode
         case .grokBuild: return .grok
+        case .cursor: return .cursor
         default: return nil
         }
     }
