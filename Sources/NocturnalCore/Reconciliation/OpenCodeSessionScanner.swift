@@ -143,10 +143,23 @@ public struct OpenCodeSessionScanner: Sendable {
         // Read-only safety for concurrent writers.
         _ = sqlite3_exec(db, "PRAGMA query_only = ON;", nil, nil, nil)
 
-        // Core columns only — metric column names vary across OpenCode builds.
-        // A prepare failure here used to silently skip the entire SQLite path.
+        // Discover optional metric columns — names vary across OpenCode builds.
+        let columns = Self.tableColumns(db: db, table: "session")
+        let has = { (name: String) in columns.contains(name) }
+        var select = ["id", "title", "directory", "time_updated"]
+        let tokensInCol = ["tokens_input", "tokens_in", "input_tokens"].first(where: has)
+        let tokensOutCol = ["tokens_output", "tokens_out", "output_tokens"].first(where: has)
+        let addCol = ["summary_additions", "diff_added", "additions"].first(where: has)
+        let delCol = ["summary_deletions", "diff_removed", "deletions"].first(where: has)
+        let filesCol = ["summary_files", "files_touched", "file_count"].first(where: has)
+        if let tokensInCol { select.append(tokensInCol) }
+        if let tokensOutCol { select.append(tokensOutCol) }
+        if let addCol { select.append(addCol) }
+        if let delCol { select.append(delCol) }
+        if let filesCol { select.append(filesCol) }
+
         let sql = """
-        SELECT id, title, directory, time_updated
+        SELECT \(select.joined(separator: ", "))
         FROM session
         WHERE time_archived IS NULL OR time_archived = 0
         ORDER BY time_updated DESC
@@ -168,6 +181,19 @@ public struct OpenCodeSessionScanner: Sendable {
             let directory = sqlite3_column_text(stmt, 2).map { String(cString: $0) }
             let updatedMs = sqlite3_column_int64(stmt, 3)
 
+            var col = 4
+            func nextOptionalInt() -> Int? {
+                defer { col += 1 }
+                guard col < select.count else { return nil }
+                if sqlite3_column_type(stmt, Int32(col)) == SQLITE_NULL { return nil }
+                return Int(sqlite3_column_int64(stmt, Int32(col)))
+            }
+            let tokensIn = tokensInCol != nil ? nextOptionalInt() : nil
+            let tokensOut = tokensOutCol != nil ? nextOptionalInt() : nil
+            let additions = addCol != nil ? nextOptionalInt() : nil
+            let deletions = delCol != nil ? nextOptionalInt() : nil
+            let files = filesCol != nil ? nextOptionalInt() : nil
+
             let ts = EventEnvelopeDateParsing.parseEpoch(Double(updatedMs)) ?? Date()
             out.append(
                 OpenCodeSessionSnapshot(
@@ -175,16 +201,33 @@ public struct OpenCodeSessionScanner: Sendable {
                     title: title,
                     workingDirectory: directory,
                     timestamp: ts,
-                    tokensIn: nil,
-                    tokensOut: nil,
-                    diffAdded: nil,
-                    diffRemoved: nil,
-                    filesTouched: nil,
+                    tokensIn: tokensIn,
+                    tokensOut: tokensOut,
+                    diffAdded: additions,
+                    diffRemoved: deletions,
+                    filesTouched: files,
                     storagePath: dbURL.path
                 )
             )
         }
         return out
+    }
+
+    /// Column names for `table` (empty on failure).
+    private static func tableColumns(db: OpaquePointer, table: String) -> Set<String> {
+        var stmt: OpaquePointer?
+        let sql = "PRAGMA table_info(\(table));"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
+            return []
+        }
+        defer { sqlite3_finalize(stmt) }
+        var names = Set<String>()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let cName = sqlite3_column_text(stmt, 1) {
+                names.insert(String(cString: cName))
+            }
+        }
+        return names
     }
 
     // MARK: - JSON fallback

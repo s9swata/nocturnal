@@ -204,7 +204,16 @@ public actor SessionStore {
     /// still merge when useful, but lifecycle state is left alone.
     @discardableResult
     public func apply(_ envelope: EventEnvelope) async -> Session {
-        let decoded = decoder.decode(envelope)
+        var decoded = decoder.decode(envelope)
+        // NAP attention resolution: clear pending UI even when a product decoder
+        // only understands native aliases (tool.approval_resolved).
+        let nap = CanonicalAgentEvent.normalize(envelope.eventType)
+        if nap == CanonicalAgentEvent.permissionResolved.rawValue {
+            decoded.clearApproval = true
+        }
+        if nap == CanonicalAgentEvent.questionAnswered.rawValue {
+            decoded.clearQuestion = true
+        }
         if decoded.isUnknown {
             unknownEventCount &+= 1
         }

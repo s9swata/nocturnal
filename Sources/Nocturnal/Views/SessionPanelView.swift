@@ -143,12 +143,18 @@ struct QuietSessionsHiddenView: View {
 
     private var hiddenLabel: String {
         if model.recoveryStubCount > 0, model.quietSessionCount == model.recoveryStubCount {
-            return "\(model.recoveryStubCount) recovered from disk"
+            let n = model.recoveryStubCount
+            return n == 1
+                ? "1 recovered session from disk is hidden"
+                : "\(n) recovered sessions from disk are hidden"
         }
         if model.quietSessionCount > 0 {
-            return "\(model.quietSessionCount) quiet sessions"
+            let n = model.quietSessionCount
+            return n == 1
+                ? "1 quiet session is hidden"
+                : "\(n) quiet sessions are hidden"
         }
-        return "Quiet sessions"
+        return "Quiet sessions are hidden"
     }
 
     var body: some View {
@@ -156,7 +162,7 @@ struct QuietSessionsHiddenView: View {
             Text("No live sessions")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(NocturnalPalette.fgPrimary)
-            Text("\(hiddenLabel) are hidden so the list stays useful.")
+            Text("\(hiddenLabel) so the list stays useful.")
                 .font(.caption)
                 .foregroundStyle(NocturnalPalette.fgSecondary)
                 .multilineTextAlignment(.center)
@@ -170,7 +176,9 @@ struct QuietSessionsHiddenView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(NocturnalLayout.contentPadding)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("No live sessions. \(hiddenCount) quiet hidden.")
+        .accessibilityLabel(
+            "No live sessions. \(hiddenCount) quiet \(hiddenCount == 1 ? "session" : "sessions") hidden."
+        )
     }
 }
 

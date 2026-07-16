@@ -64,7 +64,8 @@ public enum SessionActivityMapping: Sendable {
         }
 
         switch type {
-        case "PreToolUse", "tool.started":
+        case "PreToolUse":
+            // `tool.started` is normalized to PreToolUse before the switch.
             let tool = extracted.toolName ?? "tool"
             applyToolStart(to: &session, tool: tool, extracted: extracted, eventType: type, at: at)
             session.stats.toolUseCount += 1
@@ -82,7 +83,10 @@ public enum SessionActivityMapping: Sendable {
                 diffRemoved: extracted.diffRemoved
             )
 
-        case "PostToolUse", "PostToolUseFailure", "tool.completed":
+        case "PostToolUse", "PostToolUseFailure":
+            // `tool.completed` normalizes to PostToolUse.
+            let defaultOutcome: ActivityOutcome =
+                type == "PostToolUseFailure" ? .failure : .success
             if let path = extracted.path {
                 session.stats.recordTouchedPath(path)
             }
@@ -101,7 +105,7 @@ public enum SessionActivityMapping: Sendable {
                     || completedName?.isEmpty == true
                     || completedName == currentName
                 if namesMatch {
-                    current.outcome = extracted.outcome ?? .success
+                    current.outcome = extracted.outcome ?? defaultOutcome
                     current.endedAt = at
                     if current.command == nil { current.command = extracted.command }
                     if current.primaryPath == nil { current.primaryPath = extracted.path }
@@ -119,7 +123,7 @@ public enum SessionActivityMapping: Sendable {
                         primaryPath: extracted.path,
                         command: extracted.command,
                         integration: extracted.integration,
-                        outcome: extracted.outcome ?? .success
+                        outcome: extracted.outcome ?? defaultOutcome
                     )
                     session.recentActivities.insert(finished, at: 0)
                     if session.recentActivities.count > SessionActivityPolicy.maxRecent {
@@ -140,7 +144,7 @@ public enum SessionActivityMapping: Sendable {
                     primaryPath: extracted.path,
                     command: extracted.command,
                     integration: extracted.integration,
-                    outcome: extracted.outcome ?? .success
+                    outcome: extracted.outcome ?? defaultOutcome
                 )
                 session.recentActivities.insert(finished, at: 0)
                 if session.recentActivities.count > SessionActivityPolicy.maxRecent {
@@ -152,7 +156,7 @@ public enum SessionActivityMapping: Sendable {
             // Intentionally do not set currentActivity to "Working" — that hid the
             // last tool title on the notch between tools.
 
-        case "tool.approval_required", "PermissionRequest":
+        case "tool.approval_required", "PermissionRequest", "permission.asked":
             if session.currentActivity?.kind != .approval {
                 let tool = extracted.toolName
                     ?? EventDecodeHelpers.string(payload, "tool", "tool_name", "name")
@@ -175,7 +179,7 @@ public enum SessionActivityMapping: Sendable {
                 )
             }
 
-        case "tool.approval_resolved", "agent.question_answered":
+        case "tool.approval_resolved", "permission.resolved", "agent.question_answered", "question.answered":
             SessionActivityPolicy.endCurrent(on: &session, at: at)
             // Leave current empty so UI keeps showing last tool / prompt, not "Working".
 
@@ -196,8 +200,35 @@ public enum SessionActivityMapping: Sendable {
                 tokensOut: extracted.tokensOut
             )
 
-        case "agent.turn.completed", "Stop", "SubagentStop", "turn.completed":
+        case "agent.turn.completed", "turn.completed":
+            // Mid-session turn end — clear active activity; keep last tool in recent.
             SessionActivityPolicy.endCurrent(on: &session, at: at)
+            session.stats.mergeMetrics(
+                tokensIn: extracted.tokensIn,
+                tokensOut: extracted.tokensOut,
+                diffAdded: extracted.diffAdded,
+                diffRemoved: extracted.diffRemoved
+            )
+
+        case "Stop", "SubagentStop":
+            SessionActivityPolicy.endCurrent(on: &session, at: at)
+            // Explicit stop: leave a finished "Idle" breadcrumb so the island
+            // can prefer stop status over the last tool as primary live copy.
+            // SessionEnd still owns the stronger "Completed" label.
+            if type == "Stop" {
+                SessionActivityPolicy.setCurrent(
+                    SessionActivity(
+                        kind: .session,
+                        label: "Idle",
+                        detail: extracted.detail ?? decoded.summaryHint,
+                        eventType: type,
+                        startedAt: at,
+                        endedAt: at
+                    ),
+                    on: &session
+                )
+                SessionActivityPolicy.endCurrent(on: &session, at: at)
+            }
             session.stats.mergeMetrics(
                 tokensIn: extracted.tokensIn,
                 tokensOut: extracted.tokensOut,
@@ -370,17 +401,31 @@ public enum SessionActivityMapping: Sendable {
         return String(collapsed[..<idx]) + "…"
     }
 
-    /// Map Grok/Cursor/NAP wire names onto the PascalCase cases this mapper owns.
+    /// Map Grok/Cursor/NAP wire names onto the cases this mapper owns.
+    ///
+    /// Uses ``CanonicalAgentEvent/normalize(_:)`` so NAP producers (e.g.
+    /// `permission.resolved`) reach the same paths as native aliases.
     public static func normalizeEventType(_ raw: String) -> String {
-        let grok = GrokEventDecoder.normalizeEventType(raw)
-        switch grok {
-        case "tool.started": return "PreToolUse"
-        case "tool.completed": return "PostToolUse"
-        case "turn.started": return "agent.turn.started"
-        case "turn.completed": return "Stop"
-        case "session.started": return "SessionStart"
-        case "session.completed": return "SessionEnd"
-        default: return grok
+        let nap = CanonicalAgentEvent.normalize(raw)
+        switch nap {
+        case CanonicalAgentEvent.toolStarted.rawValue: return "PreToolUse"
+        case CanonicalAgentEvent.toolCompleted.rawValue: return "PostToolUse"
+        case CanonicalAgentEvent.turnStarted.rawValue: return "agent.turn.started"
+        // Keep turn rest distinct from product `Stop` (which adds an Idle breadcrumb).
+        case CanonicalAgentEvent.turnCompleted.rawValue: return "agent.turn.completed"
+        case CanonicalAgentEvent.sessionStarted.rawValue: return "SessionStart"
+        case CanonicalAgentEvent.sessionCompleted.rawValue: return "SessionEnd"
+        case CanonicalAgentEvent.permissionAsked.rawValue: return "PermissionRequest"
+        case CanonicalAgentEvent.permissionResolved.rawValue: return "permission.resolved"
+        case CanonicalAgentEvent.questionAsked.rawValue: return "agent.question"
+        case CanonicalAgentEvent.questionAnswered.rawValue: return "question.answered"
+        default:
+            let grok = GrokEventDecoder.normalizeEventType(raw)
+            switch grok {
+            case "tool.started": return "PreToolUse"
+            case "tool.completed": return "PostToolUse"
+            default: return grok
+            }
         }
     }
 }

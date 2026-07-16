@@ -156,22 +156,8 @@ enum SessionPresentation {
                 return truncate(title, limit: 46)
             }
         }
-        // Stats fallback from last PreToolUse.
-        if let tool = session.stats.lastToolName, !tool.isEmpty {
-            let synthetic = SessionActivity(
-                kind: .tool,
-                label: tool,
-                detail: session.stats.lastCommand,
-                eventType: "stats",
-                toolName: tool,
-                command: session.stats.lastCommand,
-                integration: ToolPayloadExtraction.classify(
-                    toolName: tool,
-                    command: session.stats.lastCommand,
-                    path: nil,
-                    detail: nil
-                )
-            )
+        // Stats fallback from last PreToolUse — finished (past tense), shared with island.
+        if let synthetic = session.statsFallbackFinishedToolActivity {
             return truncate(synthetic.humanizedTitle, limit: 46)
         }
         return nil

@@ -19,7 +19,8 @@ struct CursorBridgeTests {
             configRoot: temp,
             forwarderBinaryPath: URL(fileURLWithPath: "\(temp.path)/bin/nocturnal-hook-forwarder"),
             socketPath: URL(fileURLWithPath: "\(temp.path)/ipc.sock"),
-            backupsDirectory: temp.appendingPathComponent("backups", isDirectory: true)
+            backupsDirectory: temp.appendingPathComponent("backups", isDirectory: true),
+            mode: .mergeNative
         )
 
         // Pre-seed a foreign Cursor hook to prove we merge, not clobber.
@@ -116,8 +117,11 @@ struct CursorBridgeTests {
         )
         #expect(!tabRead.isUnknown)
         #expect(tabRead.state == .running)
-        #expect(tabRead.summaryHint?.lowercased().contains("read") == true
-            || tabRead.titleHint?.lowercased().contains("read") == true)
+        // Summary/title are set independently; require a concrete Read signal.
+        #expect(tabRead.titleHint == "Read" || tabRead.summaryHint?.contains("Read") == true)
+        if let summary = tabRead.summaryHint {
+            #expect(summary.lowercased().contains("read") || summary.lowercased().contains("tool"))
+        }
 
         let tabEdit = decoder.decode(
             EventEnvelope(
@@ -208,12 +212,10 @@ struct CursorBridgeTests {
         let sessions = await store.allSessions()
         let session = try #require(sessions.first)
         #expect(session.source == .cursor)
-        #expect(session.id.rawValue.contains("conv-cursor") || !session.id.rawValue.isEmpty)
-        #expect(
-            session.stats.lastToolName != nil
-                || session.stats.toolUseCount > 0
-                || session.recentActivities.contains { $0.kind == .tool }
-        )
+        #expect(session.id.rawValue == "conv-cursor-demo-001")
+        #expect(session.stats.toolUseCount > 0)
+        #expect(session.stats.lastToolName != nil)
+        #expect(session.recentActivities.contains { $0.kind == .tool })
     }
 
     @Test func activityMappingHandlesCursorPreToolUse() {

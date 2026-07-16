@@ -102,15 +102,24 @@ struct SessionTimelineView: View {
 
                 ForEach(items) { activity in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        AnimatedStatusSymbol(
-                            systemName: SessionPresentation.activitySymbolName(for: activity),
-                            color: activity.isActive
-                                ? NocturnalPalette.accentSuccess
-                                : NocturnalPalette.fgSecondary,
-                            size: 11,
-                            animate: !prefersReducedMotion && !systemReduceMotion && activity.isActive,
-                            mode: activity.isActive ? .running : .idle
-                        )
+                        if activity.isActive {
+                            DotmSquareLoader(
+                                style: DotmSquareLoader.style(for: activity),
+                                size: 14,
+                                dotSize: 2,
+                                color: NocturnalPalette.accentSuccess,
+                                speed: 1.05,
+                                animate: !prefersReducedMotion && !systemReduceMotion
+                            )
+                        } else {
+                            AnimatedStatusSymbol(
+                                systemName: SessionPresentation.activitySymbolName(for: activity),
+                                color: NocturnalPalette.fgSecondary,
+                                size: 11,
+                                animate: false,
+                                mode: .idle
+                            )
+                        }
 
                         ActivityLineLabel(
                             line: activity.humanizedLine,

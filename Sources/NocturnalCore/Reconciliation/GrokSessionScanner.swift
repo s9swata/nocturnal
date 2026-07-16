@@ -245,7 +245,9 @@ public struct GrokSessionScanner: Sendable {
 
         // Newest first; cap before parsing large trees.
         candidates.sort { $0.mtime > $1.mtime }
-        let limited = candidates.prefix(max(maxSessions * 2, 40))
+        // Saturating cap: avoid `maxSessions * 2` overflow for huge maxSessions.
+        let doubleCap = maxSessions > Int.max / 2 ? Int.max : maxSessions * 2
+        let limited = candidates.prefix(max(doubleCap, 40))
 
         var out: [GrokSessionSnapshot] = []
         out.reserveCapacity(limited.count)
@@ -322,16 +324,22 @@ public struct GrokSessionScanner: Sendable {
     }
 
     /// Load a regular file only when its size is within `maxBytes`.
+    ///
+    /// Uses a bounded `FileHandle` read (maxBytes+1) so a concurrent writer that
+    /// enlarges the file after `stat` cannot force a full unbounded allocation.
     private static func readBoundedFile(
         _ url: URL,
         maxBytes: Int,
         fileManager: FileManager
     ) -> Data? {
-        guard let attrs = try? fileManager.attributesOfItem(atPath: url.path),
-              let sizeNumber = attrs[.size] as? NSNumber
-        else { return nil }
-        let size = sizeNumber.intValue
-        guard size > 0, size <= maxBytes else { return nil }
-        return try? Data(contentsOf: url)
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: maxBytes + 1), !data.isEmpty else {
+            return nil
+        }
+        // Exactly maxBytes+1 means the file is larger than the recovery limit.
+        guard data.count <= maxBytes else { return nil }
+        return data
     }
 }

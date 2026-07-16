@@ -26,7 +26,8 @@ struct GrokBridgeTests {
             configRoot: temp,
             forwarderBinaryPath: URL(fileURLWithPath: "\(temp.path)/bin/nocturnal-hook-forwarder"),
             socketPath: URL(fileURLWithPath: "\(temp.path)/ipc.sock"),
-            backupsDirectory: temp.appendingPathComponent("backups", isDirectory: true)
+            backupsDirectory: temp.appendingPathComponent("backups", isDirectory: true),
+            mode: .mergeNative
         )
 
         let result = try installer.install(product: .grok)
@@ -246,13 +247,12 @@ struct GrokBridgeTests {
         let sessions = await store.allSessions()
         let session = try #require(sessions.first)
         #expect(session.source == .grokBuild)
-        #expect(session.id.rawValue.contains("019f6a16") || !session.id.rawValue.isEmpty)
-        #expect(session.workingDirectory?.contains("nocturnal") == true
-            || session.workingDirectory != nil)
-        // snake_case pre_tool_use must create real tool stats (not leave OpenCode owning the pill).
-        #expect(session.stats.lastToolName == "run_terminal_command"
-            || session.stats.toolUseCount > 0
-            || session.recentActivities.contains { $0.kind == .tool })
+        #expect(session.id.rawValue == "019f6a16-73ac-7d62-ae56-b93d8a080800")
+        #expect(session.workingDirectory?.contains("nocturnal") == true)
+        // snake_case pre_tool_use must create real tool stats.
+        #expect(session.stats.toolUseCount > 0)
+        #expect(session.stats.lastToolName == "run_terminal_command")
+        #expect(session.recentActivities.contains { $0.kind == .tool })
     }
 
     @Test func activityMappingNormalizesGrokSnakeCaseTools() {

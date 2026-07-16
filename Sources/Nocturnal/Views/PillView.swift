@@ -128,7 +128,8 @@ struct PillView: View {
                 decisionChips(for: request)
                     .fixedSize()
                     .layoutPriority(1)
-            } else if !content.trailingSources.isEmpty || content.liveCount > 1 {
+            } else if isLive || !trailingLiveSessions.isEmpty {
+                // Right side: dynamic matrix loaders (dotm-square-1…5), not agent brand marks.
                 trailingStrip
                     .fixedSize()
             }
@@ -187,6 +188,7 @@ struct PillView: View {
     @ViewBuilder
     private var leadingMark: some View {
         // Fixed container so attention ring pulse never paints outside clip.
+        // Left stays agent/owl brand; live activity matrix lives on the right strip.
         let ringPad: CGFloat = isAttention ? 6 : 0
         let box = markSize + ringPad * 2
         ZStack {
@@ -239,26 +241,84 @@ struct PillView: View {
         }
     }
 
+    /// Live sessions shown as matrix loaders on the right (one per agent family, max 3).
+    private var trailingLiveSessions: [Session] {
+        let live = model.snapshot.sessions.filter { session in
+            !session.isRecoveryStub
+                && (
+                    session.state.needsAttention
+                        || session.state == .running
+                        || session.currentActivity?.isActive == true
+                        || (session.stats.lastToolName != nil && !session.isQuiet)
+                )
+        }
+        .sorted { $0.updatedAt > $1.updatedAt }
+
+        var out: [Session] = []
+        var seen = Set<AgentSource>()
+        for session in live {
+            let key = session.source == .unknown
+                ? AgentSource(parsing: session.id.rawValue)
+                : session.source
+            // Prefer unique product sources; fall back to session id uniqueness for unknowns.
+            if session.source == .unknown {
+                if out.contains(where: { $0.id == session.id }) { continue }
+                out.append(session)
+            } else if seen.insert(key).inserted {
+                out.append(session)
+            }
+            if out.count >= 3 { break }
+        }
+        if out.isEmpty, let primary = model.primaryLiveSession, isLive {
+            return [primary]
+        }
+        return out
+    }
+
     @ViewBuilder
     private var trailingStrip: some View {
-        HStack(spacing: 4) {
-            ForEach(Array(content.trailingSources.enumerated()), id: \.offset) { index, source in
-                AgentBrandMark(
-                    source: source,
-                    size: 9,
-                    color: index == 0 && isAttention
+        let sessions = trailingLiveSessions
+        HStack(spacing: 5) {
+            ForEach(sessions, id: \.id) { session in
+                let active = session.state.needsAttention
+                    || session.state == .running
+                    || session.currentActivity?.isActive == true
+                let style: DotmSquareLoader.Style = {
+                    if let activity = session.currentActivity, activity.isActive {
+                        return DotmSquareLoader.style(for: activity)
+                    }
+                    return DotmSquareLoader.style(for: session.source)
+                }()
+                DotmSquareLoader(
+                    style: style,
+                    size: trailingMatrixSize,
+                    dotSize: max(1.6, trailingMatrixSize / 6.5),
+                    // Full-strength tint; static mode uses per-dot 50% opacity inside
+                    // the loader (avoid double-dimming to muddy black).
+                    color: session.state.needsAttention
                         ? NocturnalPalette.accentAttention
-                        : NocturnalPalette.fgSecondary.opacity(0.9)
+                        : NocturnalPalette.fgPrimary,
+                    speed: active ? 1.1 : 0.85,
+                    animate: !reduceMotion && active,
+                    staticOpacity: 0.5
                 )
-                .opacity(0.95)
+                .accessibilityLabel("\(session.source.displayName) \(style.accessibilityName)")
             }
-            if content.liveCount > content.trailingSources.count {
-                Text("+\(content.liveCount - content.trailingSources.count)")
+            if content.liveCount > sessions.count {
+                Text("+\(content.liveCount - sessions.count)")
                     .font(.caption2.monospacedDigit().weight(.semibold))
                     .foregroundStyle(NocturnalPalette.fgSecondary)
             }
         }
         .accessibilityLabel("\(content.liveCount) live sessions")
+    }
+
+    private var trailingMatrixSize: CGFloat {
+        switch content.mode {
+        case .quiet, .listening: return 11
+        case .liveCompact: return 12
+        case .liveExpanded, .attention: return 13
+        }
     }
 
     // MARK: - Style

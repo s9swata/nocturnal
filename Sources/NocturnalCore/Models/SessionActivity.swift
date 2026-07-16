@@ -338,7 +338,7 @@ public struct HumanizedActivityLine: Sendable, Equatable, Hashable {
         if lower.contains("task") || lower.contains("subagent") || lower.contains("spawn") {
             let body = firstNonEmpty(det.map { compactCommand($0, limit: 36) }, prettyToken(rawTool))
             return HumanizedActivityLine(
-                verb: active ? "Task" : "Task",
+                verb: "Task",
                 detail: body == "Task" ? nil : body
             )
         }

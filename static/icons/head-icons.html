@@ -6,7 +6,6 @@
 <script>
 (function () {
   var stage = (document.documentElement.getAttribute("data-nocturnal-stage")
-    || (typeof process !== "undefined" && process.env && process.env.NOCTURNAL_STAGE)
     || "production").toLowerCase();
   if (stage !== "staging" && stage !== "dev") stage = "production";
   var base = "/static/icons/" + stage + "/";

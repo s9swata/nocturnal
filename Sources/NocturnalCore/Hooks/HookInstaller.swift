@@ -433,11 +433,14 @@ public struct HookInstaller: Sendable {
         var nativeConfigPath: String?
     }
 
-    /// Products whose "native" surface is the only path that makes live activity work.
+    /// Products that always install a native surface even in sidecar mode.
+    ///
+    /// OpenCode's live path is the JS plugin only (no hooks.json equivalent).
+    /// Grok/Cursor respect ``mode`` so `--mode sidecar` stays sidecar-only.
     private func alwaysMergeNative(_ product: HookProduct) -> Bool {
         switch product {
-        case .opencode, .grok, .cursor: return true
-        case .codex, .claude: return false
+        case .opencode: return true
+        case .codex, .claude, .grok, .cursor: return false
         }
     }
 

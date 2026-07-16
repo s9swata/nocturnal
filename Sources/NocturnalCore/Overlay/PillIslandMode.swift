@@ -156,25 +156,25 @@ public enum PillIslandPresentation: Sendable {
             )
         }
 
-        // Live tool / waiting / idle-with-history.
-        if let line = toolLine(for: session) {
-            let useExpanded = pathShort != nil || liveCount > 1
-            return PillIslandContent(
-                mode: useExpanded ? .liveExpanded : .liveCompact,
-                source: session.source,
-                primary: line.fullLine,
-                secondary: useExpanded
-                    ? [agent, pathShort].compactMap { $0 }.joined(separator: " · ")
-                    : agent,
-                primaryLine: line,
-                trailingSources: trailing,
-                liveCount: max(liveCount, 1),
-                attentionCount: attentionCount,
-                sessionId: session.id.rawValue
-            )
-        }
+        // Still working: active tool, or mid-turn last tool between hooks.
+        if isActivelyWorking(session) {
+            if let line = activeOrRecentToolLine(for: session, allowRecent: true) {
+                let useExpanded = pathShort != nil || liveCount > 1
+                return PillIslandContent(
+                    mode: useExpanded ? .liveExpanded : .liveCompact,
+                    source: session.source,
+                    primary: line.fullLine,
+                    secondary: useExpanded
+                        ? [agent, pathShort].compactMap { $0 }.joined(separator: " · ")
+                        : agent,
+                    primaryLine: line,
+                    trailingSources: trailing,
+                    liveCount: max(liveCount, 1),
+                    attentionCount: attentionCount,
+                    sessionId: session.id.rawValue
+                )
+            }
 
-        if session.state == .running {
             let primary: String
             let primaryLine: HumanizedActivityLine
             if let activity = session.currentActivity,
@@ -200,13 +200,16 @@ public enum PillIslandPresentation: Sendable {
             )
         }
 
-        // Idle but still primary (recent tools).
+        // Agent stopped / idle / terminal — never present last tool as live work.
+        let status = stoppedStatus(for: session)
+        let last = activeOrRecentToolLine(for: session, allowRecent: true)
+        let secondaryParts = [last?.fullLine, agent, pathShort].compactMap { $0 }
         return PillIslandContent(
             mode: .liveCompact,
             source: session.source,
-            primary: "Idle",
-            secondary: agent,
-            primaryLine: HumanizedActivityLine(verb: "Idle"),
+            primary: status.verb,
+            secondary: secondaryParts.isEmpty ? nil : secondaryParts.joined(separator: " · "),
+            primaryLine: status,
             trailingSources: trailing,
             liveCount: liveCount,
             attentionCount: attentionCount,
@@ -214,7 +217,34 @@ public enum PillIslandPresentation: Sendable {
         )
     }
 
-    private static func toolLine(for session: Session) -> HumanizedActivityLine? {
+    /// True while the agent is still in a live lifecycle (running / active activity).
+    private static func isActivelyWorking(_ session: Session) -> Bool {
+        if session.state.needsAttention { return true }
+        if session.state == .running { return true }
+        if session.currentActivity?.isActive == true { return true }
+        return false
+    }
+
+    /// Primary verb for a session that is no longer running.
+    private static func stoppedStatus(for session: Session) -> HumanizedActivityLine {
+        switch session.state {
+        case .completed:
+            return HumanizedActivityLine(verb: "Done")
+        case .failed:
+            return HumanizedActivityLine(verb: "Failed")
+        case .cancelled:
+            return HumanizedActivityLine(verb: "Cancelled")
+        case .idle, .unknown, .running, .waitingForApproval, .waitingForInput:
+            // `.running` is filtered by ``isActivelyWorking``; idle/unknown land here.
+            return HumanizedActivityLine(verb: "Idle")
+        }
+    }
+
+    /// Active in-flight tool, or (when `allowRecent`) last finished tool for context.
+    private static func activeOrRecentToolLine(
+        for session: Session,
+        allowRecent: Bool
+    ) -> HumanizedActivityLine? {
         if let activity = session.currentActivity,
            activity.isActive,
            activity.kind == .tool || activity.kind == .approval
@@ -224,6 +254,7 @@ public enum PillIslandPresentation: Sendable {
                 return line
             }
         }
+        guard allowRecent else { return nil }
         if let recent = session.recentActivities.first(where: {
             $0.kind == .tool || $0.kind == .approval
         }) {
@@ -232,23 +263,7 @@ public enum PillIslandPresentation: Sendable {
                 return line
             }
         }
-        if let tool = session.stats.lastToolName, !tool.isEmpty {
-            let synthetic = SessionActivity(
-                kind: .tool,
-                label: tool,
-                detail: session.stats.lastCommand,
-                eventType: "stats",
-                startedAt: session.updatedAt,
-                endedAt: session.updatedAt, // finished tool — past-tense "Ran" not "Running"
-                toolName: tool,
-                command: session.stats.lastCommand,
-                integration: ToolPayloadExtraction.classify(
-                    toolName: tool,
-                    command: session.stats.lastCommand,
-                    path: nil,
-                    detail: nil
-                )
-            )
+        if let synthetic = session.statsFallbackFinishedToolActivity {
             let line = synthetic.humanizedLine.truncated(limit: 46)
             if !Session.isNoiseStatusText(line.fullLine) {
                 return line

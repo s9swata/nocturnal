@@ -71,6 +71,71 @@ struct PillIslandPresentationTests {
         #expect(content.secondary?.contains("branch") == true)
     }
 
+    @Test func idleSessionShowsDoneNotLastToolAsPrimary() {
+        var session = Session(
+            id: SessionID("s-idle"),
+            source: .claude,
+            state: .idle,
+            title: "Done work",
+            workingDirectory: "/Users/demo/Projects/nocturnal",
+            createdAt: now,
+            updatedAt: now
+        )
+        session.stats.lastToolName = "write"
+        session.recentActivities = [
+            SessionActivity(
+                kind: .tool,
+                label: "write",
+                detail: "foo.txt",
+                eventType: "PostToolUse",
+                startedAt: now,
+                endedAt: now,
+                toolName: "write",
+                primaryPath: "foo.txt"
+            ),
+        ]
+        let content = PillIslandPresentation.content(
+            sessions: [session],
+            socketRunning: true
+        )
+        #expect(content.primary == "Idle" || content.primaryLine?.verb == "Idle")
+        // Last tool may appear on secondary as context, not as the live primary claim.
+        #expect(content.secondary?.lowercased().contains("write") == true
+            || content.secondary?.lowercased().contains("foo") == true
+            || content.secondary?.lowercased().contains("wrote") == true
+            || content.secondary?.lowercased().contains("edited") == true)
+    }
+
+    @Test func completedSessionShowsDone() {
+        var session = Session(
+            id: SessionID("s-done"),
+            source: .codex,
+            state: .completed,
+            title: "Finished",
+            createdAt: now,
+            updatedAt: now
+        )
+        session.recentActivities = [
+            SessionActivity(
+                kind: .tool,
+                label: "Bash",
+                detail: "swift test",
+                eventType: "PostToolUse",
+                startedAt: now,
+                endedAt: now,
+                toolName: "Bash",
+                command: "swift test",
+                integration: .shell
+            ),
+        ]
+        let content = PillIslandPresentation.content(
+            sessions: [session],
+            socketRunning: true
+        )
+        #expect(content.primary == "Done")
+        #expect(content.primaryLine?.verb == "Done")
+    }
+
     @Test func liveExpandedWhenToolAndPathPresent() {
         var session = Session(
             id: SessionID("s2"),

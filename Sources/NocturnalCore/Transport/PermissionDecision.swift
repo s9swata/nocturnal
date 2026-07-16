@@ -201,8 +201,16 @@ public enum HookDecisionTranslator: Sendable {
 public actor PermissionBroker {
     private var waiters: [String: [CheckedContinuation<PermissionDecisionResult, Never>]] = [:]
     private var timeoutTasks: [String: Task<Void, Never>] = [:]
-    /// Completions that arrived before ``wait`` (always-allow race).
-    private var early: [String: PermissionDecisionResult] = [:]
+    /// Recent completions retained briefly so late/duplicate hooks with the same
+    /// correlation id do not block until timeout after an always-allow race.
+    private var early: [String: EarlyCompletion] = [:]
+    /// How long a completion stays available for late waiters.
+    private let earlyTTL: TimeInterval = 30
+
+    private struct EarlyCompletion {
+        var result: PermissionDecisionResult
+        var expiresAt: Date
+    }
 
     public init() {}
 
@@ -215,9 +223,13 @@ public actor PermissionBroker {
         timeoutSeconds: TimeInterval
     ) async -> PermissionDecisionResult {
         let id = decisionRequestId
-        if let done = early.removeValue(forKey: id) {
-            return done
+        pruneExpiredEarly()
+        // Keep the early entry until TTL so a second hook with the same id
+        // (always-allow / retry) does not block after the first consumed it.
+        if let done = early[id], done.expiresAt > Date() {
+            return done.result
         }
+        early.removeValue(forKey: id)
 
         return await withCheckedContinuation { (continuation: CheckedContinuation<PermissionDecisionResult, Never>) in
             waiters[id, default: []].append(continuation)
@@ -236,16 +248,34 @@ public actor PermissionBroker {
     public func complete(decisionRequestId: String, result: PermissionDecisionResult) {
         let id = decisionRequestId
         cancelTimeout(id: id)
+        // Always retain a short-lived completion for late waiters (shared correlation).
+        storeEarly(id: id, result: result)
         if let list = waiters.removeValue(forKey: id), !list.isEmpty {
             for waiter in list {
                 waiter.resume(returning: result)
             }
-        } else {
-            early[id] = result
+        }
+    }
+
+    private func storeEarly(id: String, result: PermissionDecisionResult) {
+        pruneExpiredEarly()
+        early[id] = EarlyCompletion(
+            result: result,
+            expiresAt: Date().addingTimeInterval(earlyTTL)
+        )
+        if early.count > 64 {
+            // Drop oldest-expired-first; if still over cap, clear all.
+            let now = Date()
+            early = early.filter { $0.value.expiresAt > now }
             if early.count > 64 {
                 early.removeAll(keepingCapacity: true)
             }
         }
+    }
+
+    private func pruneExpiredEarly() {
+        let now = Date()
+        early = early.filter { $0.value.expiresAt > now }
     }
 
     public func complete(

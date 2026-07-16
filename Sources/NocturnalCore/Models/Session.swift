@@ -256,6 +256,30 @@ public struct Session: Identifiable, Codable, Sendable, Hashable {
         return summary.localizedCaseInsensitiveContains("Recovered from local")
     }
 
+    /// Finished-tool synthetic activity for notch/panel fallbacks (past tense).
+    ///
+    /// Shared by island and expanded-panel presentation so both surfaces use
+    /// the same completion semantics (`Ran` not `Running`).
+    public var statsFallbackFinishedToolActivity: SessionActivity? {
+        guard let tool = stats.lastToolName, !tool.isEmpty else { return nil }
+        return SessionActivity(
+            kind: .tool,
+            label: tool,
+            detail: stats.lastCommand,
+            eventType: "stats",
+            startedAt: updatedAt,
+            endedAt: updatedAt,
+            toolName: tool,
+            command: stats.lastCommand,
+            integration: ToolPayloadExtraction.classify(
+                toolName: tool,
+                command: stats.lastCommand,
+                path: nil,
+                detail: nil
+            )
+        )
+    }
+
     /// Quiet: idle/terminal with nothing actionable.
     public var isQuiet: Bool {
         if state.needsAttention { return false }
@@ -266,6 +290,9 @@ public struct Session: Identifiable, Codable, Sendable, Hashable {
     }
 
     /// Best single line for live UI: tool activity preferred over "Working"/lifecycle noise.
+    ///
+    /// When the session is idle/terminal, lead with stop status so rows do not look
+    /// like the agent is still running the last tool.
     public var liveStatusLine: String {
         if let current = currentActivity, current.isActive {
             // Prefer real tools; ignore placeholder turn labels.
@@ -275,6 +302,26 @@ public struct Session: Identifiable, Codable, Sendable, Hashable {
             if current.kind != .turn, !Self.isNoiseStatusText(current.displayLine) {
                 return current.displayLine
             }
+        }
+        if state == .idle || state.isTerminal {
+            let status: String = {
+                switch state {
+                case .completed: return "Done"
+                case .failed: return "Failed"
+                case .cancelled: return "Cancelled"
+                default: return "Idle"
+                }
+            }()
+            if let recent = recentActivities.first(where: { $0.kind == .tool || $0.kind == .approval }) {
+                let tool = recent.humanizedTitle
+                if !Self.isNoiseStatusText(tool) {
+                    return "\(status) · \(tool)"
+                }
+            }
+            if !summary.isEmpty, !Self.isNoiseStatusText(summary) {
+                return "\(status) · \(summary)"
+            }
+            return status
         }
         if let recent = recentActivities.first(where: { $0.kind == .tool || $0.kind == .approval }) {
             return recent.humanizedTitle

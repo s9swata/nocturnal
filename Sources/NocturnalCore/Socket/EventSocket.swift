@@ -101,34 +101,42 @@ public actor EventSocketServer {
     }
 
     public func stop() async {
+        // Tear down *local* state synchronously first so a concurrent `start()`
+        // cannot be undone by post-await cleanup (finished stream / unlinked sock).
         isRunning = false
         acceptTask?.cancel()
         acceptTask = nil
         listener?.close()
         listener = nil
-        // Resume any permission waits before closing FDs — Task.cancel does not
-        // resume PermissionBroker.wait, and a late write to a reused descriptor
-        // would corrupt a new connection.
-        await permissionBroker.cancelAll(with: .deferred)
-        // Shutdown then close client fds so off-actor blocking reads unblock promptly.
-        // `close` alone can leave a peer `read` blocked on some Darwin kernels;
-        // `shutdown(SHUT_RDWR)` forces EOF/error on the blocked reader first.
-        for handle in clientHandles.values {
+
+        let handles = clientHandles
+        clientHandles = [:]
+        let tasks = Array(clientTasks.values)
+        clientTasks = [:]
+        let cont = eventContinuation
+        eventContinuation = nil
+        eventStream = nil
+
+        // Unlink before any suspension so a restart can rebind this path.
+        try? FileManager.default.removeItem(at: path)
+
+        // Shutdown then close captured client fds so off-actor blocking reads
+        // unblock. Do not touch `clientHandles` / stream after this point.
+        for handle in handles.values {
             let fd = handle.fileDescriptor
             if fd >= 0 {
                 Darwin.shutdown(fd, SHUT_RDWR)
             }
             try? handle.close()
         }
-        clientHandles.removeAll()
-        for task in clientTasks.values {
+        for task in tasks {
             task.cancel()
         }
-        clientTasks.removeAll()
-        eventContinuation?.finish()
-        eventContinuation = nil
-        eventStream = nil
-        try? FileManager.default.removeItem(at: path)
+        cont?.finish()
+
+        // Resume permission waiters last (may suspend). Captured-only teardown
+        // above means this cannot clobber a newly started server.
+        await permissionBroker.cancelAll(with: .deferred)
     }
 
     public func currentDiagnostics() -> EventSocketDiagnostics {

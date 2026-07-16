@@ -40,7 +40,15 @@ struct AgentIntegrationTests {
     }
 
     @Test func installableMatchesHookProducts() {
-        let products = AgentRegistry.installable.compactMap { AgentRegistry.hookProduct(for: $0) }
+        let installable = AgentRegistry.installable
+        // Every installable profile must map to a HookProduct (no silent drops).
+        for profile in installable {
+            #expect(
+                AgentRegistry.hookProduct(for: profile) != nil,
+                "installable profile \(profile.id) missing hookProduct"
+            )
+        }
+        let products = installable.compactMap { AgentRegistry.hookProduct(for: $0) }
         #expect(Set(products) == Set(HookProduct.allCases))
     }
 
@@ -52,9 +60,12 @@ struct AgentIntegrationTests {
         #expect(AgentSource(parsing: "agy").displayName == "Agy")
     }
 
-    @Test func adHocSourceGetsEnvelopeBridge() {
+    @Test func adHocSourceGetsEnvelopeBridgeCapabilities() {
         let profile = AgentRegistry.profile(parsing: "my-custom-agent")
         #expect(profile.id == "my-custom-agent")
+        #expect(profile.source == .unknown)
+        #expect(profile.capabilities == .envelopeBridge)
+        #expect(profile.decisionTransport == .none)
         #expect(profile.capabilities.liveActivity)
         #expect(!profile.supportsInlinePermissionDecision)
     }

@@ -44,7 +44,7 @@ public struct AgentCapabilities: Sendable, Equatable, Hashable, Codable {
         installableHooks: true
     )
 
-    /// OpenCode: live + permissions (HTTP) + installable plugin; questions best-effort.
+    /// OpenCode: live + permissions (HTTP) + installable plugin; no questions surface.
     public static let openCode = AgentCapabilities(
         liveActivity: true,
         permissions: true,

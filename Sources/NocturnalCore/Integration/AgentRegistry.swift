@@ -146,18 +146,21 @@ public enum AgentRegistry: Sendable {
         let key = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if key.isEmpty { return unknown }
 
-        if let exact = all.first(where: { $0.id == key }) {
-            return exact
-        }
-        if let aliased = all.first(where: { profile in
-            profile.aliases.contains { $0.lowercased() == key }
-        }) {
-            return aliased
-        }
-        // Fall back through AgentSource parsing (handles codex/claude aliases).
+        // Dedicated products: single source of alias truth is ``AgentSource``.
         let source = AgentSource(parsing: key)
         if source != .unknown {
             return profile(for: source)
+        }
+        // Exact registry id (custom / ad-hoc profiles may match `all` ids).
+        if let exact = all.first(where: { $0.id == key }) {
+            return exact
+        }
+        // Registry aliases only for source-less / custom profiles.
+        if let aliased = all.first(where: { profile in
+            profile.source == .unknown
+                && profile.aliases.contains { $0.lowercased() == key }
+        }) {
+            return aliased
         }
         // Unknown label still gets envelope-bridge capabilities so events can surface.
         return AgentProfile(

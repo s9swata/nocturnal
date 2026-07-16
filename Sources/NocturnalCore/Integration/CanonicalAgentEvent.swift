@@ -2,9 +2,9 @@ import Foundation
 
 /// Nocturnal Agent Protocol (NAP) — canonical `eventType` strings on ``EventEnvelope``.
 ///
-/// Adapters map product-native names (e.g. Codex `PermissionRequest`, OpenCode
-/// `permission.asked`) into these where possible. Unknown types remain fail-open
-/// metadata and never crash the store.
+/// Product-native names are mapped via ``normalize(_:)`` at store apply and
+/// activity mapping (see ``SessionStore/apply`` and ``SessionActivityMapping``).
+/// Unknown types remain fail-open metadata and never crash the store.
 public enum CanonicalAgentEvent: String, Sendable, Codable, Hashable, CaseIterable {
     // Lifecycle
     case sessionStarted = "session.started"

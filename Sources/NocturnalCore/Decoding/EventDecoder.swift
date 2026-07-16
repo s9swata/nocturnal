@@ -58,26 +58,24 @@ public final class CompositeEventDecoder: EventDecoding, @unchecked Sendable {
         case .cursor:
             result = cursor.decode(envelope)
         case .kimi, .agy:
-            // Tier A: best-effort structural decode.
-            let cursorResult = cursor.decode(envelope)
-            if !cursorResult.isUnknown {
-                result = cursorResult
-            } else {
-                let grokResult = grok.decode(envelope)
-                if !grokResult.isUnknown {
-                    result = grokResult
-                } else {
-                    let codexResult = codex.decode(envelope)
-                    if !codexResult.isUnknown {
-                        result = codexResult
-                    } else {
-                        let claudeResult = claude.decode(envelope)
-                        result = claudeResult.isUnknown
-                            ? Self.unknownPassthrough(envelope)
-                            : claudeResult
-                    }
-                }
+            // Tier A: best-effort structural decode via Cursor/Grok/Codex/Claude
+            // shapes, but keep the envelope's product identity (Cursor decoder
+            // always stamps inferredSource = .cursor).
+            var structural = cursor.decode(envelope)
+            if structural.isUnknown {
+                structural = grok.decode(envelope)
             }
+            if structural.isUnknown {
+                structural = codex.decode(envelope)
+            }
+            if structural.isUnknown {
+                let claudeResult = claude.decode(envelope)
+                structural = claudeResult.isUnknown
+                    ? Self.unknownPassthrough(envelope)
+                    : claudeResult
+            }
+            structural.inferredSource = envelope.source
+            result = structural
         case .unknown:
             // OpenCode ses_* / native bus names — never Claude by accident.
             if OpenCodeSessionIdentity.isOpenCodeSessionId(envelope.sessionId)
